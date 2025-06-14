@@ -44,12 +44,14 @@ ensure_env_file_exists()
 # Load environment variables from .env file
 load_dotenv(override=True)
 
-from fastapi import FastAPI, Request, Form, HTTPException, Depends
+from fastapi import FastAPI, Request, Form, HTTPException, Depends, UploadFile, File
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import json
+import tempfile
+import shutil
 
 from tts_engine import generate_speech_from_api, AVAILABLE_VOICES, DEFAULT_VOICE, VOICE_TO_LANGUAGE, AVAILABLE_LANGUAGES
 
@@ -88,6 +90,10 @@ class APIResponse(BaseModel):
     voice: str
     output_file: str
     generation_time: float
+
+class ZeroShotSpeechRequest(BaseModel):
+    text: str
+    voice_transcript: str
 
 # OpenAI-compatible API endpoint
 @app.post("/v1/audio/speech")
@@ -141,6 +147,80 @@ async def list_voices():
             "voices": AVAILABLE_VOICES
         }
     )
+
+@app.post("/v1/audio/speech/zero-shot")
+async def create_zero_shot_speech(
+    text: str = Form(...),
+    voice_transcript: str = Form(...),
+    voice_audio: UploadFile = File(...)
+):
+    """
+    Generate speech using zero-shot voice cloning.
+    
+    This endpoint accepts:
+    - text: The text to synthesize
+    - voice_transcript: The transcript of the voice audio sample
+    - voice_audio: An audio file (WAV format) containing the voice to clone
+    
+    The voice audio should be:
+    - Clear speech without background noise
+    - 3-10 seconds in length
+    - WAV format (other formats will be converted)
+    """
+    if not text:
+        raise HTTPException(status_code=400, detail="Missing text")
+    if not voice_transcript:
+        raise HTTPException(status_code=400, detail="Missing voice transcript")
+    if not voice_audio:
+        raise HTTPException(status_code=400, detail="Missing voice audio file")
+    
+    # Save uploaded audio file to temp location
+    temp_audio_path = None
+    try:
+        # Create a temporary file to store the uploaded audio
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+            temp_audio_path = tmp_file.name
+            # Copy uploaded file contents to temp file
+            shutil.copyfileobj(voice_audio.file, tmp_file)
+        
+        # Generate unique output filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = f"outputs/zero_shot_{timestamp}.wav"
+        
+        # Generate speech with zero-shot voice cloning
+        start = time.time()
+        generate_speech_from_api(
+            prompt=text,
+            voice="zero_shot",  # This will be overridden internally
+            output_file=output_path,
+            voice_audio_path=temp_audio_path,
+            voice_transcript=voice_transcript,
+            use_batching=len(text) > 1000,
+            max_batch_chars=1000
+        )
+        end = time.time()
+        generation_time = round(end - start, 2)
+        
+        # Return the generated audio file
+        return FileResponse(
+            path=output_path,
+            media_type="audio/wav",
+            filename=f"zero_shot_{timestamp}.wav",
+            headers={
+                "X-Generation-Time": str(generation_time),
+                "X-Voice-Type": "zero-shot"
+            }
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating speech: {str(e)}")
+    finally:
+        # Clean up temporary audio file
+        if temp_audio_path and os.path.exists(temp_audio_path):
+            try:
+                os.remove(temp_audio_path)
+            except:
+                pass
 
 # Legacy API endpoint for compatibility
 @app.post("/speak")

@@ -10,6 +10,8 @@ import argparse
 import threading
 import queue
 import asyncio
+import re
+from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional, Generator, Union, Tuple
 from dotenv import load_dotenv
@@ -175,6 +177,8 @@ AVAILABLE_LANGUAGES = ["english", "french", "german", "korean", "hindi", "mandar
 
 # Import the unified token handling from speechpipe
 from .speechpipe import turn_token_into_id, CUSTOM_TOKEN_PREFIX
+import librosa
+from snac import SNAC
 
 # Special token IDs for Orpheus model
 START_TOKEN_ID = 128259
@@ -220,8 +224,90 @@ class PerformanceMonitor:
 # Create global performance monitor
 perf_monitor = PerformanceMonitor()
 
-def format_prompt(prompt: str, voice: str = DEFAULT_VOICE) -> str:
-    """Format prompt for Orpheus model with voice prefix and special tokens."""
+# Initialize SNAC model for zero-shot voice cloning
+snac_model = None
+
+def get_snac_model():
+    """Get or initialize the SNAC model for audio tokenization"""
+    global snac_model
+    if snac_model is None:
+        if not IS_RELOADER:
+            print("Loading SNAC model for zero-shot voice cloning...")
+        snac_model = SNAC.from_pretrained("hubertsiuzdak/snac_24khz")
+        if torch.cuda.is_available():
+            snac_model = snac_model.cuda()
+        elif torch.backends.mps.is_available():
+            snac_model = snac_model.to("mps")
+    return snac_model
+
+def tokenize_audio_for_voice_cloning(audio_file_path: str) -> List[int]:
+    """Tokenize an audio file for zero-shot voice cloning.
+    
+    Args:
+        audio_file_path: Path to the audio file to tokenize
+        
+    Returns:
+        List of token IDs for the audio
+    """
+    # Load audio at 24kHz sample rate
+    audio_array, sample_rate = librosa.load(audio_file_path, sr=24000)
+    
+    # Convert to torch tensor
+    waveform = torch.from_numpy(audio_array).unsqueeze(0)
+    waveform = waveform.to(dtype=torch.float32)
+    
+    # Add batch dimension
+    waveform = waveform.unsqueeze(0)
+    
+    # Get SNAC model
+    model = get_snac_model()
+    
+    # Move waveform to same device as model
+    if torch.cuda.is_available():
+        waveform = waveform.cuda()
+    elif torch.backends.mps.is_available():
+        waveform = waveform.to("mps")
+    
+    # Encode audio to tokens
+    with torch.inference_mode():
+        codes = model.encode(waveform)
+    
+    # Convert multi-layer codes to flat token sequence
+    # Following the pattern from the Jupyter notebook
+    all_codes = []
+    for i in range(codes[0].shape[1]):
+        all_codes.append(codes[0][0][i].item() + 128266)
+        all_codes.append(codes[1][0][2*i].item() + 128266 + 4096)
+        all_codes.append(codes[2][0][4*i].item() + 128266 + (2*4096))
+        all_codes.append(codes[2][0][(4*i)+1].item() + 128266 + (3*4096))
+        all_codes.append(codes[1][0][(2*i)+1].item() + 128266 + (4*4096))
+        all_codes.append(codes[2][0][(4*i)+2].item() + 128266 + (5*4096))
+        all_codes.append(codes[2][0][(4*i)+3].item() + 128266 + (6*4096))
+    
+    return all_codes
+
+def format_prompt(prompt: str, voice: str = DEFAULT_VOICE, voice_audio_tokens: Optional[List[int]] = None, voice_transcript: Optional[str] = None) -> Union[str, Dict[str, Any]]:
+    """Format prompt for Orpheus model with voice prefix and special tokens.
+    
+    Args:
+        prompt: The text to synthesize
+        voice: Voice name (for standard voices) or 'zero_shot' for voice cloning
+        voice_audio_tokens: Token sequence from voice audio (for zero-shot cloning)
+        voice_transcript: Transcript of the voice audio (for zero-shot cloning)
+        
+    Returns:
+        Either a string prompt (standard mode) or a dict with zero-shot data
+    """
+    # If zero-shot voice cloning is requested
+    if voice == "zero_shot" and voice_audio_tokens and voice_transcript:
+        return {
+            "type": "zero_shot",
+            "voice_tokens": voice_audio_tokens,
+            "voice_transcript": voice_transcript,
+            "target_text": prompt
+        }
+    
+    # Standard voice mode
     # Validate voice and provide fallback
     if voice not in AVAILABLE_VOICES:
         print(f"Warning: Voice '{voice}' not recognized. Using '{DEFAULT_VOICE}' instead.")
@@ -238,11 +324,49 @@ def format_prompt(prompt: str, voice: str = DEFAULT_VOICE) -> str:
 
 def generate_tokens_from_api(prompt: str, voice: str = DEFAULT_VOICE, temperature: float = TEMPERATURE, 
                            top_p: float = TOP_P, max_tokens: int = MAX_TOKENS, 
-                           repetition_penalty: float = REPETITION_PENALTY) -> Generator[str, None, None]:
+                           repetition_penalty: float = REPETITION_PENALTY,
+                           voice_audio_tokens: Optional[List[int]] = None,
+                           voice_transcript: Optional[str] = None) -> Generator[str, None, None]:
     """Generate tokens from text using OpenAI-compatible API with optimized streaming and retry logic."""
     start_time = time.time()
-    formatted_prompt = format_prompt(prompt, voice)
-    print(f"Generating speech for: {formatted_prompt}")
+    formatted_prompt = format_prompt(prompt, voice, voice_audio_tokens, voice_transcript)
+    
+    # Handle zero-shot voice cloning
+    if isinstance(formatted_prompt, dict) and formatted_prompt.get("type") == "zero_shot":
+        # For zero-shot voice cloning, we need to format the prompt differently
+        # Following the pattern from the Jupyter notebook
+        print(f"Generating zero-shot speech cloning for: {formatted_prompt['target_text'][:50]}...")
+        
+        # Create the zero-shot prompt format
+        # Format: SOH SOT voice_transcript EOT SOH SOS voice_audio_tokens EOS EOAI SOH target_text EOH
+        start_tokens = [128259]  # SOH
+        text_start = [128261]  # SOT
+        text_end = [128257]  # EOT
+        speech_start = [128260]  # SOS
+        speech_end = [128009]  # EOS
+        ai_end = [128262]  # EOAI
+        human_end = [128258]  # EOH
+        
+        # Build the complete prompt with tokens
+        # The API expects a special format for zero-shot cloning
+        zero_shot_prompt = {
+            "type": "zero_shot",
+            "voice_transcript": formatted_prompt["voice_transcript"],
+            "voice_tokens": formatted_prompt["voice_tokens"],
+            "target_text": formatted_prompt["target_text"],
+            "special_tokens": {
+                "start": start_tokens,
+                "text_start": text_start,
+                "text_end": text_end,
+                "speech_start": speech_start,
+                "speech_end": speech_end,
+                "ai_end": ai_end,
+                "human_end": human_end
+            }
+        }
+        formatted_prompt = json.dumps(zero_shot_prompt)
+    else:
+        print(f"Generating speech for: {formatted_prompt}")
     
     # Optimize the token generation for GPUs
     if HIGH_END_GPU:
@@ -619,11 +743,6 @@ def stream_audio(audio_buffer):
     except Exception as e:
         print(f"Audio playback error: {e}")
 
-import re
-import numpy as np
-from io import BytesIO
-import wave
-
 def split_text_into_sentences(text):
     """Split text into sentences with a more reliable approach."""
     # We'll use a simple approach that doesn't rely on variable-width lookbehinds
@@ -671,7 +790,8 @@ def split_text_into_sentences(text):
 
 def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temperature=TEMPERATURE, 
                      top_p=TOP_P, max_tokens=MAX_TOKENS, repetition_penalty=None, 
-                     use_batching=True, max_batch_chars=1000):
+                     use_batching=True, max_batch_chars=1000,
+                     voice_audio_path=None, voice_transcript=None):
     """Generate speech from text using Orpheus model with performance optimizations."""
     print(f"Starting speech generation for '{prompt[:50]}{'...' if len(prompt) > 50 else ''}'")
     print(f"Using voice: {voice}, GPU acceleration: {'Yes (High-end)' if HIGH_END_GPU else 'Yes' if torch.cuda.is_available() else 'No'}")
@@ -681,6 +801,21 @@ def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temp
     perf_monitor = PerformanceMonitor()
     
     start_time = time.time()
+    
+    # Handle zero-shot voice cloning if requested
+    voice_audio_tokens = None
+    if voice_audio_path and voice_transcript:
+        print(f"Processing voice audio for zero-shot cloning: {voice_audio_path}")
+        try:
+            voice_audio_tokens = tokenize_audio_for_voice_cloning(voice_audio_path)
+            voice = "zero_shot"  # Set voice to trigger zero-shot mode
+            print(f"Successfully tokenized voice audio: {len(voice_audio_tokens)} tokens")
+        except Exception as e:
+            print(f"Error tokenizing voice audio: {e}")
+            print("Falling back to default voice")
+            voice = DEFAULT_VOICE
+            voice_audio_tokens = None
+            voice_transcript = None
     
     # For shorter text, use the standard non-batched approach
     if not use_batching or len(prompt) < max_batch_chars:
@@ -693,7 +828,9 @@ def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temp
                 temperature=temperature,
                 top_p=top_p,
                 max_tokens=max_tokens,
-                repetition_penalty=REPETITION_PENALTY  # Always use hardcoded value
+                repetition_penalty=REPETITION_PENALTY,  # Always use hardcoded value
+                voice_audio_tokens=voice_audio_tokens,
+                voice_transcript=voice_transcript
             ),
             output_file=output_file
         )
@@ -754,7 +891,9 @@ def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temp
                 temperature=temperature,
                 top_p=top_p,
                 max_tokens=max_tokens,
-                repetition_penalty=REPETITION_PENALTY
+                repetition_penalty=REPETITION_PENALTY,
+                voice_audio_tokens=voice_audio_tokens,
+                voice_transcript=voice_transcript
             ),
             output_file=temp_output_file
         )
