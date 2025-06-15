@@ -70,12 +70,19 @@ def get_orpheus_model():
                 dtype = torch.bfloat16
                 if not IS_RELOADER:
                     print(f"Loading model on CUDA with bfloat16 precision")
+                    print(f"GPU detected: {torch.cuda.get_device_name(0)}")
+                    print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
             else:
                 device = "cpu"
                 dtype = torch.float32
                 if not IS_RELOADER:
                     print(f"Loading model on CPU with float32 precision")
                     print("WARNING: CPU inference will be slow. GPU recommended for production use.")
+                    print("\nGPU NOT DETECTED! This is likely because:")
+                    print("1. You have the CPU-only version of PyTorch installed")
+                    print("2. Run: pip uninstall torch torchvision torchaudio -y")
+                    print("3. Then: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121")
+                    print("\nYour system has an RTX 6000 - it should be detected!")
             
             # Handle Orpheus models specially (like the notebook)
             if "orpheus" in model_name.lower():
@@ -177,17 +184,59 @@ def generate_with_model(
     """Generate tokens using the loaded model"""
     model, _ = get_orpheus_model()
     
-    with torch.no_grad():
-        generated_ids = model.generate(
-            input_ids=input_ids,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=temperature,
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-            eos_token_id=128258,
-            pad_token_id=128258
-        )
+    # Add attention mask to avoid warnings
+    attention_mask = torch.ones_like(input_ids)
+    
+    print(f"Generating with max_new_tokens={max_new_tokens}...")
+    
+    # For CPU, add a simple progress indicator
+    if not torch.cuda.is_available():
+        print("CPU generation started. Progress dots will appear (each = ~10 tokens):")
+        print("[", end="", flush=True)
+        
+        class ProgressCallback:
+            def __init__(self):
+                self.count = 0
+            
+            def __call__(self, *args, **kwargs):
+                self.count += 1
+                if self.count % 10 == 0:
+                    print(".", end="", flush=True)
+                return False  # Don't stop generation
+        
+        progress = ProgressCallback()
+        
+        with torch.no_grad():
+            generated_ids = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=temperature,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                eos_token_id=128258,
+                pad_token_id=128258,
+                use_cache=True,
+                stopping_criteria=[progress] if not torch.cuda.is_available() else None
+            )
+        
+        if not torch.cuda.is_available():
+            print("]")
+    else:
+        with torch.no_grad():
+            generated_ids = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=temperature,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                eos_token_id=128258,
+                pad_token_id=128258,
+                use_cache=True
+            )
     
     return generated_ids
 
@@ -335,15 +384,30 @@ def generate_zero_shot_speech(
     
     # Generate tokens
     start_time = time.time()
-    generated_ids = generate_with_model(
-        input_ids,
-        max_new_tokens=max_tokens,
-        temperature=temperature,
-        top_p=top_p
-    )
+    print(f"Starting model generation (this may take a while on CPU)...")
+    print(f"Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
     
-    generation_time = time.time() - start_time
-    print(f"Model generation completed in {generation_time:.2f}s")
+    # For CPU, use fewer tokens to avoid long waits
+    if not torch.cuda.is_available():
+        max_tokens = min(max_tokens, 500)  # Limit to 500 tokens on CPU
+        print(f"CPU mode: Limiting generation to {max_tokens} tokens for faster response")
+    
+    try:
+        generated_ids = generate_with_model(
+            input_ids,
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p
+        )
+        
+        generation_time = time.time() - start_time
+        print(f"Model generation completed in {generation_time:.2f}s")
+        print(f"Generated shape: {generated_ids.shape}")
+    except Exception as e:
+        print(f"ERROR during generation: {e}")
+        import traceback
+        traceback.print_exc()
+        return
     
     # Extract speech tokens
     speech_tokens = extract_speech_tokens(generated_ids, input_length)

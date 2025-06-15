@@ -817,12 +817,24 @@ def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temp
     voice_audio_tokens = None
     if voice_audio_path and voice_transcript:
         print(f"Processing voice audio for zero-shot cloning: {voice_audio_path}")
+        
+        # Log file size
+        try:
+            file_size = os.path.getsize(voice_audio_path)
+            print(f"Voice audio file size: {file_size} bytes ({file_size/1024:.2f} KB)")
+            if file_size < 1000:  # Less than 1KB
+                print("WARNING: Voice audio file seems too small!")
+        except:
+            print("Could not get file size")
+        
         try:
             voice_audio_tokens = tokenize_audio_for_voice_cloning(voice_audio_path)
             voice = "zero_shot"  # Set voice to trigger zero-shot mode
             print(f"Successfully tokenized voice audio: {len(voice_audio_tokens)} tokens")
         except Exception as e:
             print(f"Error tokenizing voice audio: {e}")
+            import traceback
+            traceback.print_exc()
             print("Falling back to default voice")
             voice = DEFAULT_VOICE
             voice_audio_tokens = None
