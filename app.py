@@ -68,14 +68,21 @@ app = FastAPI(
 async def startup_event():
     """Initialize models and resources on startup"""
     if os.environ.get("ORPHEUS_ENABLE_MODEL_INFERENCE", "false").lower() == "true":
-        print("Initializing direct model inference...")
-        if initialize_model():
-            print("✅ Model inference initialized successfully")
-        else:
-            print("❌ Failed to initialize model inference")
+        print("\nInitializing direct model inference...")
+        try:
+            if initialize_model():
+                print("✅ Model inference initialized successfully")
+                print("Zero-shot voice cloning is now available at /v1/audio/speech/zero-shot")
+        except Exception as e:
+            print(f"❌ Failed to initialize model inference: {e}")
             print("Zero-shot voice cloning will not be available")
+            print("Standard TTS via API is still fully functional")
     else:
-        print("Direct model inference is disabled (set ORPHEUS_ENABLE_MODEL_INFERENCE=true to enable)")
+        print("\nDirect model inference is disabled")
+        print("To enable zero-shot voice cloning:")
+        print("1. Set ORPHEUS_ENABLE_MODEL_INFERENCE=true in .env")
+        print("2. Use a compatible model (not the default Orpheus model due to tokenizer issues)")
+        print("\nStandard TTS via API is fully functional")
 
 # We'll use FastAPI's built-in startup complete mechanism
 # The log message "INFO:     Application startup complete." indicates

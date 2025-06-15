@@ -22,24 +22,49 @@ IS_RELOADER = is_reloader_process()
 _orpheus_model = None
 _tokenizer = None
 _model_loaded = False
+_use_simple_tokenizer = False  # Flag to use simple tokenization
+
+# Llama tokenizer as fallback
+_llama_tokenizer = None
+
+def get_llama_tokenizer():
+    """Get a Llama tokenizer as fallback"""
+    global _llama_tokenizer
+    if _llama_tokenizer is None:
+        from transformers import LlamaTokenizer
+        # Try to use a known working Llama tokenizer
+        try:
+            _llama_tokenizer = LlamaTokenizer.from_pretrained("huggyllama/llama-7b")
+        except:
+            # If that fails, create a basic one
+            _llama_tokenizer = LlamaTokenizer.from_pretrained("hf-internal-testing/llama-tokenizer")
+    return _llama_tokenizer
+
+def simple_tokenize_text(text: str) -> torch.Tensor:
+    """Simple text tokenization when full tokenizer is not available"""
+    # Use Llama tokenizer as fallback
+    tokenizer = get_llama_tokenizer()
+    return tokenizer(text, return_tensors="pt").input_ids[0]
 
 def get_orpheus_model():
     """Get or initialize the Orpheus model for direct inference"""
-    global _orpheus_model, _tokenizer, _model_loaded
+    global _orpheus_model, _tokenizer, _model_loaded, _use_simple_tokenizer
     
     if not _model_loaded:
         try:
             if not IS_RELOADER:
                 print("Loading Orpheus model for direct inference...")
             
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer
+            from huggingface_hub import snapshot_download
             
-            model_name = os.environ.get("ORPHEUS_MODEL_HF", "canopylabs/orpheus-3b-0.1-pretrained")
+            # Use the correct model name from the notebook
+            model_name = os.environ.get("ORPHEUS_MODEL_HF", "canopylabs/orpheus-tts-0.1-pretrained")
             
-            # Load tokenizer
-            _tokenizer = AutoTokenizer.from_pretrained(model_name)
+            if not IS_RELOADER:
+                print(f"Using model: {model_name}")
             
-            # Determine device and dtype
+            # Determine device and dtype first
             if torch.cuda.is_available():
                 device = "cuda"
                 dtype = torch.bfloat16
@@ -52,12 +77,62 @@ def get_orpheus_model():
                     print(f"Loading model on CPU with float32 precision")
                     print("WARNING: CPU inference will be slow. GPU recommended for production use.")
             
-            # Load model
-            _orpheus_model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=dtype,
-                device_map="auto" if device == "cuda" else None
-            )
+            # Handle Orpheus models specially (like the notebook)
+            if "orpheus" in model_name.lower():
+                if not IS_RELOADER:
+                    print("Using notebook approach: downloading model without tokenizer files...")
+                
+                # Download model files without tokenizer (like the notebook does)
+                model_path = snapshot_download(
+                    repo_id=model_name,
+                    allow_patterns=[
+                        "config.json",
+                        "*.safetensors",
+                        "model.safetensors.index.json",
+                    ],
+                    ignore_patterns=[
+                        "optimizer.pt",
+                        "pytorch_model.bin",
+                        "training_args.bin",
+                        "scheduler.pt",
+                        "tokenizer.json",
+                        "tokenizer_config.json",
+                        "special_tokens_map.json",
+                        "vocab.json",
+                        "merges.txt",
+                        "tokenizer.*"
+                    ]
+                )
+                
+                # Try to load tokenizer separately
+                try:
+                    # First try the standard way
+                    _tokenizer = AutoTokenizer.from_pretrained(model_name)
+                    if not IS_RELOADER:
+                        print("Loaded tokenizer successfully")
+                except:
+                    # If that fails, use fallback
+                    if not IS_RELOADER:
+                        print("WARNING: Could not load Orpheus tokenizer, using Llama tokenizer as fallback")
+                    _tokenizer = get_llama_tokenizer()
+                    _use_simple_tokenizer = True
+                
+                # Load model from downloaded path
+                _orpheus_model = AutoModelForCausalLM.from_pretrained(
+                    model_name,  # Still use model name, it should work now
+                    torch_dtype=dtype,
+                    device_map="auto" if device == "cuda" else None
+                )
+                
+            else:
+                # For non-Orpheus models, use standard loading
+                _tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+                _orpheus_model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=dtype,
+                    device_map="auto" if device == "cuda" else None,
+                    trust_remote_code=True
+                )
             
             if device == "cpu":
                 _orpheus_model = _orpheus_model.to(device)
@@ -106,11 +181,20 @@ def create_zero_shot_prompt(
     voice_transcript: str
 ) -> torch.Tensor:
     """Create the input IDs for zero-shot voice cloning"""
+    global _use_simple_tokenizer
+    
     _, tokenizer = get_orpheus_model()
     
     # Tokenize texts
-    voice_transcript_ids = tokenizer(voice_transcript, return_tensors="pt").input_ids[0]
-    target_text_ids = tokenizer(target_text, return_tensors="pt").input_ids[0]
+    if _use_simple_tokenizer or tokenizer is None:
+        # Use fallback tokenization
+        print("Using fallback tokenizer for text encoding")
+        voice_transcript_ids = simple_tokenize_text(voice_transcript)
+        target_text_ids = simple_tokenize_text(target_text)
+    else:
+        # Use the loaded tokenizer
+        voice_transcript_ids = tokenizer(voice_transcript, return_tensors="pt").input_ids[0]
+        target_text_ids = tokenizer(target_text, return_tensors="pt").input_ids[0]
     
     # Special tokens
     SOH = torch.tensor([128259])
