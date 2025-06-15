@@ -1,10 +1,12 @@
 # Zero-Shot Voice Cloning with Orpheus FastAPI
 
-This document describes how to use the zero-shot voice cloning feature that has been added to Orpheus FastAPI.
+**⚠️ IMPORTANT: This feature is currently not functional due to API limitations. See the "Current Limitations" section below.**
+
+This document describes the zero-shot voice cloning feature that has been added to Orpheus FastAPI, based on the implementation shown in the `Orpheus_0_1_Pretrain_Inference.ipynb` notebook.
 
 ## Overview
 
-Zero-shot voice cloning allows you to synthesize speech in any voice by providing just a short audio sample (3-10 seconds) of the target voice. This is based on the implementation shown in the `Orpheus_0_1_Pretrain_Inference.ipynb` notebook.
+Zero-shot voice cloning allows you to synthesize speech in any voice by providing just a short audio sample (3-10 seconds) of the target voice. This feature requires passing raw token IDs to the model, which is demonstrated in the Jupyter notebook.
 
 ## API Endpoint
 
@@ -85,12 +87,15 @@ For best results, the voice audio sample should:
 4. **Format**: WAV format (24kHz sample rate preferred)
 5. **Speech Style**: Similar to how you want the synthesized speech to sound
 
-## How It Works
+## How It Works (When Properly Implemented)
 
 1. The voice audio is tokenized using the SNAC model
-2. These tokens, along with the transcript, create a voice prompt
-3. The Orpheus model uses this prompt to generate speech in the cloned voice
+2. These tokens, along with the transcript, create a voice prompt with specific token IDs:
+   - SOH (128259) + SOT (128261) + voice_transcript + EOT (128257) + SOS (128260) + voice_audio_tokens + EOS (128009) + EOAI (128262) + SOH + target_text + EOH (128258)
+3. The Orpheus model uses this token sequence to generate speech in the cloned voice
 4. The generated tokens are decoded back to audio
+
+**Note**: This process requires direct access to the model's `generate()` function with `input_ids` parameter, which is not available through standard text-based APIs.
 
 ## Technical Details
 
@@ -101,7 +106,41 @@ The implementation follows the pattern from the Jupyter notebook:
 3. **Generation**: Uses the Orpheus model to generate speech tokens
 4. **Decoding**: Converts tokens back to audio using SNAC decoder
 
-## Limitations
+## Current Limitations
+
+### API Backend Incompatibility
+
+The main limitation is that **zero-shot voice cloning is not currently functional** with the standard Orpheus FastAPI setup because:
+
+1. **API Limitation**: The inference backend (llama.cpp or similar) accessed via `/v1/completions` only accepts text prompts, not raw token IDs
+2. **Token Requirement**: Zero-shot voice cloning requires passing specific token IDs (128259, 128261, etc.) directly to the model
+3. **Architecture Mismatch**: The Jupyter notebook uses direct model access with `model.generate(input_ids=...)`, while FastAPI uses an external API
+
+### Solutions
+
+To enable zero-shot voice cloning, you would need to:
+
+1. **Option 1: Custom Inference Server**
+   - Modify or replace the inference backend to accept token IDs
+   - Create a new endpoint that supports token-based prompts
+   - This requires significant changes to llama.cpp or your inference server
+
+2. **Option 2: Direct Model Loading**
+   - Load the Orpheus model directly in the FastAPI app
+   - Use the same approach as the Jupyter notebook
+   - Requires significant GPU memory (model is ~3B parameters)
+   - Example implementation would look like:
+   ```python
+   from transformers import AutoModelForCausalLM
+   model = AutoModelForCausalLM.from_pretrained("canopylabs/orpheus-3b-0.1-pretrained")
+   ```
+
+3. **Option 3: Hybrid Approach**
+   - Keep standard TTS using the API
+   - Load model only for zero-shot requests
+   - Higher complexity but more flexible
+
+### Other Limitations
 
 - Voice quality depends on the quality of the input sample
 - Works best with clear, noise-free recordings

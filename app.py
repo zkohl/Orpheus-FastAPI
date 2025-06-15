@@ -54,6 +54,7 @@ import tempfile
 import shutil
 
 from tts_engine import generate_speech_from_api, AVAILABLE_VOICES, DEFAULT_VOICE, VOICE_TO_LANGUAGE, AVAILABLE_LANGUAGES
+from tts_engine.model_inference import initialize_model, is_model_available
 
 # Create FastAPI app
 app = FastAPI(
@@ -61,6 +62,20 @@ app = FastAPI(
     description="High-performance Text-to-Speech server using Orpheus-FASTAPI",
     version="1.0.0"
 )
+
+# Initialize model on startup if enabled
+@app.on_event("startup")
+async def startup_event():
+    """Initialize models and resources on startup"""
+    if os.environ.get("ORPHEUS_ENABLE_MODEL_INFERENCE", "false").lower() == "true":
+        print("Initializing direct model inference...")
+        if initialize_model():
+            print("✅ Model inference initialized successfully")
+        else:
+            print("❌ Failed to initialize model inference")
+            print("Zero-shot voice cloning will not be available")
+    else:
+        print("Direct model inference is disabled (set ORPHEUS_ENABLE_MODEL_INFERENCE=true to enable)")
 
 # We'll use FastAPI's built-in startup complete mechanism
 # The log message "INFO:     Application startup complete." indicates
@@ -157,6 +172,11 @@ async def create_zero_shot_speech(
     """
     Generate speech using zero-shot voice cloning.
     
+    NOTE: This endpoint requires ORPHEUS_ENABLE_MODEL_INFERENCE=true in your .env file.
+    It loads the model directly for zero-shot voice cloning, which requires:
+    - GPU: ~6-8 GB VRAM (recommended)
+    - CPU: ~12-16 GB RAM (much slower)
+    
     This endpoint accepts:
     - text: The text to synthesize
     - voice_transcript: The transcript of the voice audio sample
@@ -173,6 +193,13 @@ async def create_zero_shot_speech(
         raise HTTPException(status_code=400, detail="Missing voice transcript")
     if not voice_audio:
         raise HTTPException(status_code=400, detail="Missing voice audio file")
+    
+    # Check if model inference is available
+    if not is_model_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Zero-shot voice cloning is not available. Set ORPHEUS_ENABLE_MODEL_INFERENCE=true and restart the server."
+        )
     
     # Save uploaded audio file to temp location
     temp_audio_path = None

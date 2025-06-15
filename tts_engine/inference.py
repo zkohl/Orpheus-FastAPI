@@ -179,6 +179,7 @@ AVAILABLE_LANGUAGES = ["english", "french", "german", "korean", "hindi", "mandar
 from .speechpipe import turn_token_into_id, CUSTOM_TOKEN_PREFIX
 import librosa
 from snac import SNAC
+from . import model_inference
 
 # Special token IDs for Orpheus model
 START_TOKEN_ID = 128259
@@ -333,40 +334,31 @@ def generate_tokens_from_api(prompt: str, voice: str = DEFAULT_VOICE, temperatur
     
     # Handle zero-shot voice cloning
     if isinstance(formatted_prompt, dict) and formatted_prompt.get("type") == "zero_shot":
-        # For zero-shot voice cloning, we need to format the prompt differently
-        # Following the pattern from the Jupyter notebook
-        print(f"Generating zero-shot speech cloning for: {formatted_prompt['target_text'][:50]}...")
-        
-        # Create the zero-shot prompt format
-        # Format: SOH SOT voice_transcript EOT SOH SOS voice_audio_tokens EOS EOAI SOH target_text EOH
-        start_tokens = [128259]  # SOH
-        text_start = [128261]  # SOT
-        text_end = [128257]  # EOT
-        speech_start = [128260]  # SOS
-        speech_end = [128009]  # EOS
-        ai_end = [128262]  # EOAI
-        human_end = [128258]  # EOH
-        
-        # Build the complete prompt with tokens
-        # The API expects a special format for zero-shot cloning
-        zero_shot_prompt = {
-            "type": "zero_shot",
-            "voice_transcript": formatted_prompt["voice_transcript"],
-            "voice_tokens": formatted_prompt["voice_tokens"],
-            "target_text": formatted_prompt["target_text"],
-            "special_tokens": {
-                "start": start_tokens,
-                "text_start": text_start,
-                "text_end": text_end,
-                "speech_start": speech_start,
-                "speech_end": speech_end,
-                "ai_end": ai_end,
-                "human_end": human_end
-            }
-        }
-        formatted_prompt = json.dumps(zero_shot_prompt)
-    else:
-        print(f"Generating speech for: {formatted_prompt}")
+        # Check if direct model inference is available
+        if model_inference.is_model_available():
+            print("Using direct model inference for zero-shot voice cloning")
+            # Use direct model generation
+            for audio_chunk in model_inference.generate_zero_shot_speech(
+                target_text=formatted_prompt["target_text"],
+                voice_tokens=formatted_prompt["voice_tokens"],
+                voice_transcript=formatted_prompt["voice_transcript"],
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens
+            ):
+                # Convert audio bytes to token format expected by the decoder
+                # We'll yield special markers to indicate raw audio
+                yield f"<audio_bytes>{len(audio_chunk)}</audio_bytes>"
+                yield audio_chunk
+            return
+        else:
+            # Model not available, show error and fall back
+            print("ERROR: Zero-shot voice cloning requires model inference to be enabled")
+            print("Set ORPHEUS_ENABLE_MODEL_INFERENCE=true in .env and ensure you have enough memory")
+            print(f"Falling back to default voice: {DEFAULT_VOICE}")
+            formatted_prompt = format_prompt(prompt, DEFAULT_VOICE)
+    
+    print(f"Generating speech for: {formatted_prompt}")
     
     # Optimize the token generation for GPUs
     if HIGH_END_GPU:
@@ -507,6 +499,15 @@ async def tokens_decoder(token_gen) -> Generator[bytes, None, None]:
     token_count = 0
     
     async for token_text in token_gen:
+        # Check if this is raw audio bytes from zero-shot generation
+        if isinstance(token_text, bytes):
+            # Direct audio bytes, just yield them
+            yield token_text
+            continue
+        elif isinstance(token_text, str) and token_text.startswith("<audio_bytes>"):
+            # Skip the audio bytes marker
+            continue
+        
         token = turn_token_into_id(token_text, count)
         if token is not None and token > 0:
             # Add to buffer using simple append (reliable method)
@@ -577,11 +578,21 @@ def tokens_decoder_sync(syn_token_gen, output_file=None):
     async def async_token_gen():
         batch = []
         for token in syn_token_gen:
-            batch.append(token)
-            if len(batch) >= batch_size:
-                for t in batch:
-                    yield t
-                batch = []
+            # Handle raw audio bytes from zero-shot generation
+            if isinstance(token, bytes) or (isinstance(token, str) and token.startswith("<audio_bytes>")):
+                # Flush any pending batch first
+                if batch:
+                    for t in batch:
+                        yield t
+                    batch = []
+                # Yield the special token directly
+                yield token
+            else:
+                batch.append(token)
+                if len(batch) >= batch_size:
+                    for t in batch:
+                        yield t
+                    batch = []
         # Process any remaining tokens in the final batch
         for t in batch:
             yield t
