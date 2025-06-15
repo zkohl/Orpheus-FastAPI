@@ -118,8 +118,24 @@ def get_orpheus_model():
                     _use_simple_tokenizer = True
                 
                 # Load model from downloaded path
+                # Handle rope_scaling compatibility
+                from transformers import AutoConfig
+                config = AutoConfig.from_pretrained(model_name)
+                
+                # Fix rope_scaling for older transformers versions
+                if hasattr(config, 'rope_scaling') and isinstance(config.rope_scaling, dict):
+                    if 'rope_type' in config.rope_scaling and config.rope_scaling['rope_type'] == 'llama3':
+                        # Convert to older format
+                        if not IS_RELOADER:
+                            print("Converting Llama3 rope_scaling to compatible format...")
+                        config.rope_scaling = {
+                            'type': 'linear',
+                            'factor': config.rope_scaling.get('factor', 32.0)
+                        }
+                
                 _orpheus_model = AutoModelForCausalLM.from_pretrained(
-                    model_name,  # Still use model name, it should work now
+                    model_name,
+                    config=config,  # Use modified config
                     torch_dtype=dtype,
                     device_map="auto" if device == "cuda" else None
                 )

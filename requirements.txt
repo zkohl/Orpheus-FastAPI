@@ -27,8 +27,10 @@ psutil==5.9.0
 
 # Model Inference Dependencies (for zero-shot voice cloning)
 # Only needed if ORPHEUS_ENABLE_MODEL_INFERENCE=true
-transformers==4.36.0
-accelerate==0.25.0
+transformers==4.44.0  # Updated to support Llama3 rope_scaling format
+accelerate==0.33.0    # Updated to match transformers version
+sentencepiece         # Required for tokenizers
+protobuf             # Required for some model formats
 
 # Optional Dependencies
 # For MP3 conversion (not currently implemented)
