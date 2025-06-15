@@ -289,19 +289,33 @@ def extract_speech_tokens(generated_ids: torch.Tensor, input_length: int) -> Lis
     # Get only the newly generated tokens
     generated_tokens = generated_ids[0][input_length:].cpu().tolist()
     
+    print(f"Total generated tokens: {len(generated_tokens)}")
+    print(f"First 20 generated tokens: {generated_tokens[:20]}")
+    
     # Find speech tokens (after SOS token)
     speech_tokens = []
     found_sos = False
+    sos_count = 0
+    eos_count = 0
     
-    for token in generated_tokens:
+    for i, token in enumerate(generated_tokens):
         if token == 128260:  # SOS
             found_sos = True
+            sos_count += 1
+            print(f"Found SOS token at position {i}")
             continue
         elif token in [128009, 128258, 128257]:  # EOS, EOH, EOT
+            eos_count += 1
             if found_sos:
+                print(f"Found end token {token} at position {i}, stopping extraction")
                 break
         elif found_sos and token >= 128266:  # Speech tokens start at 128266
             speech_tokens.append(token)
+    
+    print(f"SOS tokens found: {sos_count}")
+    print(f"Speech tokens extracted: {len(speech_tokens)}")
+    if speech_tokens:
+        print(f"First 10 speech tokens: {speech_tokens[:10]}")
     
     return speech_tokens
 
@@ -415,17 +429,31 @@ def generate_zero_shot_speech(
     
     if not speech_tokens:
         print("WARNING: No speech tokens generated")
+        print("This means the model didn't generate any audio tokens.")
+        print("Possible causes:")
+        print("- Model is not trained for zero-shot voice cloning")
+        print("- Input prompt format is incorrect")
+        print("- Voice tokens were not properly encoded")
         return
     
     # Process tokens in chunks for streaming
     chunk_size = 49  # 7 tokens * 7 frames
+    total_audio_bytes = 0
+    chunk_count = 0
     
     for i in range(0, len(speech_tokens), chunk_size):
         chunk = speech_tokens[i:i + chunk_size]
         if len(chunk) >= 7:  # Need at least one complete frame
             audio_bytes = decode_speech_tokens_to_audio(chunk)
             if audio_bytes:
+                chunk_count += 1
+                total_audio_bytes += len(audio_bytes)
+                print(f"Generated audio chunk {chunk_count}: {len(audio_bytes)} bytes")
                 yield audio_bytes
+    
+    print(f"Total audio generated: {total_audio_bytes} bytes in {chunk_count} chunks")
+    if total_audio_bytes == 0:
+        print("ERROR: No audio bytes were generated from speech tokens!")
 
 def is_model_available() -> bool:
     """Check if direct model inference is available"""

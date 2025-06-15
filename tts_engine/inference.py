@@ -717,6 +717,17 @@ def tokens_decoder_sync(syn_token_gen, output_file=None):
         wav_file.close()
         if output_file:
             print(f"Audio saved to {output_file}")
+            # Log final output file size
+            try:
+                final_size = os.path.getsize(output_file)
+                print(f"Final output file size: {final_size} bytes ({final_size/1024:.2f} KB)")
+                if final_size < 1000:  # Less than 1KB
+                    print("WARNING: Output file is suspiciously small!")
+                    print("This usually means no audio was generated.")
+                elif final_size < 10000:  # Less than 10KB
+                    print("WARNING: Output file seems very small for speech audio")
+            except Exception as e:
+                print(f"Could not check output file size: {e}")
     
     # Calculate and print detailed performance metrics
     if audio_segments:
@@ -862,6 +873,15 @@ def generate_speech_from_api(prompt, voice=DEFAULT_VOICE, output_file=None, temp
         end_time = time.time()
         total_time = end_time - start_time
         print(f"Total speech generation completed in {total_time:.2f} seconds")
+        
+        # Log output file details if created
+        if output_file and os.path.exists(output_file):
+            file_size = os.path.getsize(output_file)
+            print(f"Generated audio file: {output_file}")
+            print(f"File size: {file_size} bytes ({file_size/1024:.2f} KB)")
+            if file_size < 44:  # Just WAV header
+                print("ERROR: Output file contains only WAV header (44 bytes)")
+                print("No audio data was generated!")
         
         return result
     
@@ -1020,7 +1040,14 @@ def stitch_wav_files(input_files, output_file, crossfade_ms=50):
             output_wav.setparams(first_params)
             output_wav.writeframes(final_audio.tobytes())
         
+        # Log output file size
+        output_size = os.path.getsize(output_file)
+        duration_seconds = len(final_audio) / (first_params.framerate * first_params.sampwidth)
         print(f"Successfully stitched audio to {output_file} with crossfading")
+        print(f"Output file size: {output_size} bytes ({output_size/1024:.2f} KB)")
+        print(f"Audio duration: {duration_seconds:.2f} seconds")
+        if output_size < 1000:  # Less than 1KB
+            print("WARNING: Output file is suspiciously small!")
     except Exception as e:
         print(f"Error writing output file {output_file}: {e}")
         raise
