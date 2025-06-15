@@ -111,18 +111,52 @@ def get_orpheus_model():
                     ]
                 )
                 
-                # Try to load tokenizer separately
+                # Try to load tokenizer with different strategies
+                tokenizer_loaded = False
+                
+                # Strategy 1: Try loading from model name without special token handling
                 try:
-                    # First try the standard way
-                    _tokenizer = AutoTokenizer.from_pretrained(model_name)
+                    _tokenizer = AutoTokenizer.from_pretrained(
+                        model_name,
+                        use_fast=True,  # Try fast tokenizer first
+                        add_prefix_space=False
+                    )
+                    tokenizer_loaded = True
                     if not IS_RELOADER:
-                        print("Loaded tokenizer successfully")
-                except:
-                    # If that fails, use fallback
+                        print("Loaded Orpheus tokenizer (fast version)")
+                except Exception as e1:
                     if not IS_RELOADER:
-                        print("WARNING: Could not load Orpheus tokenizer, using Llama tokenizer as fallback")
-                    _tokenizer = get_llama_tokenizer()
-                    _use_simple_tokenizer = True
+                        print(f"Fast tokenizer failed: {e1}")
+                    
+                    # Strategy 2: Try slow tokenizer
+                    try:
+                        _tokenizer = AutoTokenizer.from_pretrained(
+                            model_name,
+                            use_fast=False
+                        )
+                        tokenizer_loaded = True
+                        if not IS_RELOADER:
+                            print("Loaded Orpheus tokenizer (slow version)")
+                    except Exception as e2:
+                        if not IS_RELOADER:
+                            print(f"Slow tokenizer failed: {e2}")
+                        
+                        # Strategy 3: Try to get tokenizer config and build manually
+                        try:
+                            from transformers import LlamaTokenizerFast
+                            # Orpheus uses a Llama-based tokenizer
+                            _tokenizer = LlamaTokenizerFast.from_pretrained(model_name)
+                            tokenizer_loaded = True
+                            if not IS_RELOADER:
+                                print("Loaded Orpheus tokenizer as LlamaTokenizerFast")
+                        except Exception as e3:
+                            if not IS_RELOADER:
+                                print(f"LlamaTokenizerFast failed: {e3}")
+                                print("\nWARNING: Could not load Orpheus tokenizer!")
+                                print("Zero-shot voice cloning will NOT work with fallback tokenizer.")
+                                print("The vocabulary mapping will be incorrect.")
+                            _tokenizer = get_llama_tokenizer()
+                            _use_simple_tokenizer = True
                 
                 # Load model from downloaded path
                 # Handle rope_scaling compatibility
@@ -261,21 +295,39 @@ def create_zero_shot_prompt(
         voice_transcript_ids = tokenizer(voice_transcript, return_tensors="pt").input_ids[0]
         target_text_ids = tokenizer(target_text, return_tensors="pt").input_ids[0]
     
-    # Special tokens
-    SOH = torch.tensor([128259])
-    SOT = torch.tensor([128261])
-    EOT = torch.tensor([128257])
-    SOS = torch.tensor([128260])
-    EOS = torch.tensor([128009])
-    EOAI = torch.tensor([128262])
-    EOH = torch.tensor([128258])
+    # Special tokens - matching notebook exactly
+    # The notebook uses different token combinations!
+    # From notebook: 
+    # start_tokens = torch.tensor([[ 128259]], dtype=torch.int64)  # SOH
+    # end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)  # EOS, SOS, SOT, EOT
+    # final_tokens = torch.tensor([[128258, 128262]], dtype=torch.int64)  # EOH, EOAI
     
-    # Build zero-shot prompt following the notebook pattern
-    # Format: SOH SOT voice_transcript EOT SOS voice_tokens EOS EOAI SOH SOT target_text EOT
+    # Let's match the notebook's structure exactly
+    start_tokens = torch.tensor([128259])  # SOH
+    end_tokens = torch.tensor([128009, 128260, 128261, 128257])  # EOS, SOS, SOT, EOT (!)
+    final_tokens = torch.tensor([128258, 128262])  # EOH, EOAI
+    
+    # Build prompt EXACTLY like notebook:
+    # zeroprompt_input_ids = torch.cat([start_tokens, input_ids, end_tokens, torch.tensor([myts]), final_tokens], dim=1)
+    # Where input_ids is voice_transcript tokenized
+    # Then: second_input_ids = torch.cat([zeroprompt_input_ids, start_tokens, input_ids, end_tokens], dim=1)
+    # Where second input_ids is target_text tokenized
+    
+    # First build the zero-shot prompt part
+    zeroprompt_part = torch.cat([
+        start_tokens,            # SOH (128259)
+        voice_transcript_ids,    # tokenized voice transcript
+        end_tokens,             # EOS, SOS, SOT, EOT (128009, 128260, 128261, 128257)
+        torch.tensor(voice_tokens),  # voice audio tokens
+        final_tokens            # EOH, EOAI (128258, 128262)
+    ])
+    
+    # Then add the target text part
     input_ids = torch.cat([
-        SOH, SOT, voice_transcript_ids, EOT,
-        SOS, torch.tensor(voice_tokens), EOS, EOAI,
-        SOH, SOT, target_text_ids, EOT
+        zeroprompt_part,
+        start_tokens,           # SOH (128259)
+        target_text_ids,        # tokenized target text  
+        end_tokens             # EOS, SOS, SOT, EOT (128009, 128260, 128261, 128257)
     ]).unsqueeze(0)
     
     # Move to same device as model
@@ -285,37 +337,42 @@ def create_zero_shot_prompt(
     return input_ids
 
 def extract_speech_tokens(generated_ids: torch.Tensor, input_length: int) -> List[int]:
-    """Extract speech tokens from generated output"""
-    # Get only the newly generated tokens
-    generated_tokens = generated_ids[0][input_length:].cpu().tolist()
+    """Extract speech tokens from generated output - following notebook approach"""
+    # Get the full generated sequence
+    full_sequence = generated_ids[0].cpu().tolist()
     
-    print(f"Total generated tokens: {len(generated_tokens)}")
-    print(f"First 20 generated tokens: {generated_tokens[:20]}")
+    print(f"Full sequence length: {len(full_sequence)}")
+    print(f"Input length: {input_length}")
     
-    # Find speech tokens (after SOS token)
-    speech_tokens = []
-    found_sos = False
-    sos_count = 0
-    eos_count = 0
+    # Find the last EOT token (128257) - like the notebook does
+    token_to_find = 128257
+    token_to_remove = 128258  # EOH
     
-    for i, token in enumerate(generated_tokens):
-        if token == 128260:  # SOS
-            found_sos = True
-            sos_count += 1
-            print(f"Found SOS token at position {i}")
-            continue
-        elif token in [128009, 128258, 128257]:  # EOS, EOH, EOT
-            eos_count += 1
-            if found_sos:
-                print(f"Found end token {token} at position {i}, stopping extraction")
-                break
-        elif found_sos and token >= 128266:  # Speech tokens start at 128266
-            speech_tokens.append(token)
+    # Find all occurrences of EOT
+    eot_positions = [i for i, token in enumerate(full_sequence) if token == token_to_find]
+    print(f"EOT positions found: {eot_positions}")
     
-    print(f"SOS tokens found: {sos_count}")
+    if eot_positions:
+        # Take everything after the last EOT
+        last_eot_idx = eot_positions[-1]
+        cropped_tokens = full_sequence[last_eot_idx + 1:]
+        print(f"Tokens after last EOT: {len(cropped_tokens)}")
+        print(f"First 20 tokens after EOT: {cropped_tokens[:20]}")
+    else:
+        # No EOT found, take everything after input
+        cropped_tokens = full_sequence[input_length:]
+        print(f"No EOT found, using tokens after input: {len(cropped_tokens)}")
+    
+    # Remove EOH tokens (128258) like the notebook
+    filtered_tokens = [t for t in cropped_tokens if t != token_to_remove]
+    
+    # Extract speech tokens (>= 128266)
+    speech_tokens = [t for t in filtered_tokens if t >= 128266]
+    
     print(f"Speech tokens extracted: {len(speech_tokens)}")
     if speech_tokens:
         print(f"First 10 speech tokens: {speech_tokens[:10]}")
+        print(f"Token range: {min(speech_tokens)} - {max(speech_tokens)}")
     
     return speech_tokens
 
