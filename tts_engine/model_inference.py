@@ -337,101 +337,179 @@ def create_zero_shot_prompt(
     return input_ids
 
 def extract_speech_tokens(generated_ids: torch.Tensor, input_length: int) -> List[int]:
-    """Extract speech tokens from generated output - following notebook approach"""
+    """Extract speech tokens from generated output - EXACTLY like notebook"""
     # Get the full generated sequence
     full_sequence = generated_ids[0].cpu().tolist()
     
-    print(f"Full sequence length: {len(full_sequence)}")
-    print(f"Input length: {input_length}")
+    print(f"[DEBUG] Full sequence length: {len(full_sequence)}")
+    print(f"[DEBUG] Input length: {input_length}")
     
-    # Find the last EOT token (128257) - like the notebook does
+    # Notebook code:
+    # token_to_find = 128257  # EOT
+    # token_to_remove = 128258  # EOH
     token_to_find = 128257
-    token_to_remove = 128258  # EOH
+    token_to_remove = 128258
     
-    # Find all occurrences of EOT
+    # Find all occurrences of EOT - notebook: token_indices = (generated_ids == token_to_find).nonzero(as_tuple=True)
     eot_positions = [i for i, token in enumerate(full_sequence) if token == token_to_find]
-    print(f"EOT positions found: {eot_positions}")
+    print(f"[DEBUG] EOT (128257) positions found: {eot_positions}")
     
+    # Notebook: if len(token_indices[1]) > 0: last_occurrence_idx = token_indices[1][-1].item()
     if eot_positions:
-        # Take everything after the last EOT
         last_eot_idx = eot_positions[-1]
+        # Notebook: cropped_tensor = generated_ids[:, last_occurrence_idx+1:]
         cropped_tokens = full_sequence[last_eot_idx + 1:]
-        print(f"Tokens after last EOT: {len(cropped_tokens)}")
-        print(f"First 20 tokens after EOT: {cropped_tokens[:20]}")
+        print(f"[DEBUG] Tokens after last EOT: {len(cropped_tokens)}")
+        print(f"[DEBUG] First 20 tokens after EOT: {cropped_tokens[:20]}")
     else:
-        # No EOT found, take everything after input
-        cropped_tokens = full_sequence[input_length:]
-        print(f"No EOT found, using tokens after input: {len(cropped_tokens)}")
+        # Notebook: else: cropped_tensor = generated_ids
+        cropped_tokens = full_sequence
+        print(f"[DEBUG] No EOT found, using full sequence")
     
-    # Remove EOH tokens (128258) like the notebook
+    # Notebook: mask = cropped_tensor != token_to_remove
+    # Remove EOH tokens (128258)
     filtered_tokens = [t for t in cropped_tokens if t != token_to_remove]
+    print(f"[DEBUG] After removing EOH (128258): {len(filtered_tokens)} tokens")
     
-    # Extract speech tokens (>= 128266)
-    speech_tokens = [t for t in filtered_tokens if t >= 128266]
+    # IMPORTANT: The notebook does NOT filter by >= 128266!
+    # It returns ALL tokens after EOT (minus EOH tokens)
+    print(f"[DEBUG] Returning all {len(filtered_tokens)} tokens (notebook doesn't filter by >= 128266)")
+    if filtered_tokens:
+        print(f"[DEBUG] First 10 tokens: {filtered_tokens[:10]}")
+        print(f"[DEBUG] Token range: {min(filtered_tokens)} - {max(filtered_tokens)}")
     
-    print(f"Speech tokens extracted: {len(speech_tokens)}")
-    if speech_tokens:
-        print(f"First 10 speech tokens: {speech_tokens[:10]}")
-        print(f"Token range: {min(speech_tokens)} - {max(speech_tokens)}")
-    
-    return speech_tokens
+    return filtered_tokens
 
 def tokens_to_speech_codes(tokens: List[int]) -> Tuple[List[int], List[int], List[int]]:
-    """Convert flat token list to SNAC layer codes"""
-    # Remove offset and redistribute to layers
-    adjusted_tokens = [t - 128266 for t in tokens if t >= 128266]
+    """Convert flat token list to SNAC layer codes - EXACTLY like notebook"""
+    print(f"[DEBUG] tokens_to_speech_codes: Processing {len(tokens)} tokens")
     
-    # Ensure we have complete frames (multiples of 7)
-    num_frames = len(adjusted_tokens) // 7
-    adjusted_tokens = adjusted_tokens[:num_frames * 7]
+    # Notebook code:
+    # new_length = (row_length // 7) * 7
+    # trimmed_row = row[:new_length]
+    # trimmed_row = [t - 128266 for t in trimmed_row]
+    
+    # First, ensure we have complete frames (multiples of 7)
+    new_length = (len(tokens) // 7) * 7
+    trimmed_tokens = tokens[:new_length]
+    print(f"[DEBUG] Trimmed to {new_length} tokens (multiple of 7)")
+    
+    # Subtract 128266 from ALL tokens (notebook does this to ALL tokens, not just >= 128266)
+    adjusted_tokens = [t - 128266 for t in trimmed_tokens]
+    print(f"[DEBUG] After subtracting 128266, first 10 adjusted tokens: {adjusted_tokens[:10]}")
+    print(f"[DEBUG] Adjusted token range: {min(adjusted_tokens) if adjusted_tokens else 'N/A'} - {max(adjusted_tokens) if adjusted_tokens else 'N/A'}")
     
     if not adjusted_tokens:
         return [], [], []
     
+    # Notebook's redistribute_codes function:
     layer_1, layer_2, layer_3 = [], [], []
+    
+    # Notebook: for i in range((len(code_list)+1)//7):
+    # But we already trimmed, so use len(adjusted_tokens)//7
+    num_frames = len(adjusted_tokens) // 7
+    print(f"[DEBUG] Processing {num_frames} frames")
     
     for i in range(num_frames):
         idx = i * 7
-        layer_1.append(adjusted_tokens[idx])
-        layer_2.append(adjusted_tokens[idx + 1] - 4096)
-        layer_3.append(adjusted_tokens[idx + 2] - 2*4096)
-        layer_3.append(adjusted_tokens[idx + 3] - 3*4096)
-        layer_2.append(adjusted_tokens[idx + 4] - 4*4096)
-        layer_3.append(adjusted_tokens[idx + 5] - 5*4096)
-        layer_3.append(adjusted_tokens[idx + 6] - 6*4096)
+        # Notebook code exactly:
+        # layer_1.append(code_list[7*i])
+        # layer_2.append(code_list[7*i+1]-4096)
+        # layer_3.append(code_list[7*i+2]-(2*4096))
+        # layer_3.append(code_list[7*i+3]-(3*4096))
+        # layer_2.append(code_list[7*i+4]-(4*4096))
+        # layer_3.append(code_list[7*i+5]-(5*4096))
+        # layer_3.append(code_list[7*i+6]-(6*4096))
+        
+        try:
+            layer_1.append(adjusted_tokens[idx])
+            layer_2.append(adjusted_tokens[idx + 1] - 4096)
+            layer_3.append(adjusted_tokens[idx + 2] - 2*4096)
+            layer_3.append(adjusted_tokens[idx + 3] - 3*4096)
+            layer_2.append(adjusted_tokens[idx + 4] - 4*4096)
+            layer_3.append(adjusted_tokens[idx + 5] - 5*4096)
+            layer_3.append(adjusted_tokens[idx + 6] - 6*4096)
+        except IndexError as e:
+            print(f"[ERROR] Index error at frame {i}, idx {idx}: {e}")
+            break
+    
+    # Validate the codes are in valid ranges for SNAC
+    print(f"[DEBUG] Layer 1 size: {len(layer_1)}, range: {min(layer_1) if layer_1 else 'N/A'} - {max(layer_1) if layer_1 else 'N/A'}")
+    print(f"[DEBUG] Layer 2 size: {len(layer_2)}, range: {min(layer_2) if layer_2 else 'N/A'} - {max(layer_2) if layer_2 else 'N/A'}")
+    print(f"[DEBUG] Layer 3 size: {len(layer_3)}, range: {min(layer_3) if layer_3 else 'N/A'} - {max(layer_3) if layer_3 else 'N/A'}")
+    
+    # SNAC expects values in range 0-4095 for each layer
+    # Check for out of bounds values
+    oob_l1 = [v for v in layer_1 if v < 0 or v > 4095]
+    oob_l2 = [v for v in layer_2 if v < 0 or v > 4095]
+    oob_l3 = [v for v in layer_3 if v < 0 or v > 4095]
+    
+    if oob_l1 or oob_l2 or oob_l3:
+        print(f"[WARNING] Out of bounds values detected!")
+        print(f"[WARNING] Layer 1 OOB: {len(oob_l1)} values")
+        print(f"[WARNING] Layer 2 OOB: {len(oob_l2)} values")
+        print(f"[WARNING] Layer 3 OOB: {len(oob_l3)} values")
+        
+        # Clamp values to valid range (0-4095)
+        layer_1 = [max(0, min(4095, v)) for v in layer_1]
+        layer_2 = [max(0, min(4095, v)) for v in layer_2]
+        layer_3 = [max(0, min(4095, v)) for v in layer_3]
+        print(f"[DEBUG] Clamped values to valid range [0, 4095]")
     
     return layer_1, layer_2, layer_3
 
 def decode_speech_tokens_to_audio(speech_tokens: List[int]) -> Optional[bytes]:
-    """Decode speech tokens to audio bytes using SNAC"""
+    """Decode speech tokens to audio bytes using SNAC - like notebook"""
+    print(f"[DECODE] Decoding {len(speech_tokens)} tokens to audio")
+    
     if not speech_tokens:
+        print(f"[DECODE] No tokens to decode")
         return None
     
     # Convert tokens to SNAC codes
     layer_1, layer_2, layer_3 = tokens_to_speech_codes(speech_tokens)
     
     if not layer_1:
+        print(f"[DECODE] No layer_1 codes after processing")
         return None
+    
+    print(f"[DECODE] Code tensor sizes - L1: {len(layer_1)}, L2: {len(layer_2)}, L3: {len(layer_3)}")
     
     # Import SNAC model (from speechpipe)
     from .speechpipe import model as snac_model, snac_device
     
-    # Create code tensors
-    codes = [
-        torch.tensor([layer_1], dtype=torch.int32, device=snac_device),
-        torch.tensor([layer_2], dtype=torch.int32, device=snac_device),
-        torch.tensor([layer_3], dtype=torch.int32, device=snac_device)
-    ]
+    # Create code tensors - notebook: codes = [torch.tensor(layer_1).unsqueeze(0), ...]
+    try:
+        codes = [
+            torch.tensor([layer_1], dtype=torch.int32, device=snac_device),
+            torch.tensor([layer_2], dtype=torch.int32, device=snac_device),
+            torch.tensor([layer_3], dtype=torch.int32, device=snac_device)
+        ]
+        print(f"[DECODE] Created code tensors on device: {snac_device}")
+    except Exception as e:
+        print(f"[ERROR] Failed to create code tensors: {e}")
+        return None
     
-    # Decode with SNAC
-    with torch.inference_mode():
-        audio_hat = snac_model.decode(codes)
+    # Decode with SNAC - notebook: audio_hat = snac_model.decode(codes)
+    try:
+        with torch.inference_mode():
+            audio_hat = snac_model.decode(codes)
+        print(f"[DECODE] SNAC decode successful, audio shape: {audio_hat.shape}")
+    except Exception as e:
+        print(f"[ERROR] SNAC decode failed: {e}")
+        print(f"[ERROR] This often means token values are out of range")
+        return None
     
     # Convert to audio bytes
-    audio_np = audio_hat.squeeze().cpu().numpy()
-    audio_int16 = (audio_np * 32767).astype(np.int16)
-    
-    return audio_int16.tobytes()
+    try:
+        audio_np = audio_hat.squeeze().cpu().numpy()
+        audio_int16 = (audio_np * 32767).astype(np.int16)
+        audio_bytes = audio_int16.tobytes()
+        print(f"[DECODE] Converted to {len(audio_bytes)} bytes of audio")
+        return audio_bytes
+    except Exception as e:
+        print(f"[ERROR] Failed to convert audio to bytes: {e}")
+        return None
 
 def generate_zero_shot_speech(
     target_text: str,
@@ -482,35 +560,47 @@ def generate_zero_shot_speech(
     
     # Extract speech tokens
     speech_tokens = extract_speech_tokens(generated_ids, input_length)
-    print(f"Extracted {len(speech_tokens)} speech tokens")
+    print(f"[MAIN] Extracted {len(speech_tokens)} tokens")
     
     if not speech_tokens:
-        print("WARNING: No speech tokens generated")
-        print("This means the model didn't generate any audio tokens.")
-        print("Possible causes:")
-        print("- Model is not trained for zero-shot voice cloning")
-        print("- Input prompt format is incorrect")
-        print("- Voice tokens were not properly encoded")
+        print("[ERROR] No tokens extracted after EOT!")
+        print("This means either:")
+        print("- No EOT token was found in generated sequence")
+        print("- No tokens were generated after EOT")
+        print("- All tokens were EOH (128258) and got filtered")
         return
     
-    # Process tokens in chunks for streaming
+    # Process tokens in chunks for streaming (like notebook processes in batches)
     chunk_size = 49  # 7 tokens * 7 frames
     total_audio_bytes = 0
     chunk_count = 0
     
+    print(f"[MAIN] Processing {len(speech_tokens)} tokens in chunks of {chunk_size}")
+    
     for i in range(0, len(speech_tokens), chunk_size):
         chunk = speech_tokens[i:i + chunk_size]
+        print(f"[CHUNK {chunk_count+1}] Processing tokens {i} to {i+len(chunk)}")
+        
         if len(chunk) >= 7:  # Need at least one complete frame
-            audio_bytes = decode_speech_tokens_to_audio(chunk)
-            if audio_bytes:
-                chunk_count += 1
-                total_audio_bytes += len(audio_bytes)
-                print(f"Generated audio chunk {chunk_count}: {len(audio_bytes)} bytes")
-                yield audio_bytes
+            try:
+                audio_bytes = decode_speech_tokens_to_audio(chunk)
+                if audio_bytes:
+                    chunk_count += 1
+                    total_audio_bytes += len(audio_bytes)
+                    print(f"[CHUNK {chunk_count}] Generated {len(audio_bytes)} audio bytes")
+                    yield audio_bytes
+                else:
+                    print(f"[CHUNK {chunk_count+1}] No audio bytes generated")
+            except Exception as e:
+                print(f"[ERROR] Failed to decode chunk {chunk_count+1}: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"[CHUNK] Skipping final {len(chunk)} tokens (need at least 7)")
     
-    print(f"Total audio generated: {total_audio_bytes} bytes in {chunk_count} chunks")
+    print(f"[MAIN] Total audio generated: {total_audio_bytes} bytes in {chunk_count} chunks")
     if total_audio_bytes == 0:
-        print("ERROR: No audio bytes were generated from speech tokens!")
+        print("[ERROR] No audio bytes were generated from tokens!")
 
 def is_model_available() -> bool:
     """Check if direct model inference is available"""
