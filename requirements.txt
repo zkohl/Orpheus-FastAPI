@@ -13,19 +13,38 @@ watchfiles==1.0.4
 # Audio Processing
 numpy==1.24.0
 sounddevice==0.4.6
-snac==1.2.1       # Required for audio generation from tokens
+snac @ git+https://github.com/hubertsiuzdak/snac.git  # Required for audio generation from tokens
+librosa>=0.10.0
 
 # System Utilities
 psutil==5.9.0
+
+# PyTorch - Install separately with CUDA support (requires torch>=2.0.0):
+huggingface-hub>=0.16.0  # Required for model downloads and management
 
 # PyTorch - Install separately with CUDA support:
 # On Windows/Linux: 
 #   pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 # On macOS:
 #   pip3 install torch torchvision torchaudio
+# Note: Ensure torch version is >=2.0.0 for compatibility
+
+# Model Inference Dependencies (for zero-shot voice cloning)
+# Only needed if ORPHEUS_ENABLE_MODEL_INFERENCE=true
+transformers==4.44.0  # Updated to support Llama3 rope_scaling format
+accelerate==0.33.0    # Updated to match transformers version
+sentencepiece         # Required for tokenizers
+protobuf             # Required for some model formats
 
 # Optional Dependencies
 # For MP3 conversion (not currently implemented)
 # pydub==0.25.1
 # For better sentence splitting (potential future improvement)
 # nltk==3.8.1
+
+# Optional Development Dependencies (from orpheus-voice-clone-notebook)
+# pytest>=7.0.0
+# black>=23.0.0
+# mypy>=1.0.0
+# pylint>=2.17.0
+# types-requests
