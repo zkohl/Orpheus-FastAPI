@@ -187,6 +187,11 @@ class VoiceCloneModel:
         Returns:
             List of generated audio file paths
         """
+        # Debug information
+        print(f"Input IDs shape: {input_ids.shape}")
+        print(f"Attention mask shape: {attention_mask.shape}")
+        print(f"Device: {input_ids.device}")
+        
         # Prepare generation parameters
         gen_params = {
             "max_new_tokens": self.config.max_new_tokens,
@@ -196,19 +201,37 @@ class VoiceCloneModel:
             "repetition_penalty": self.config.repetition_penalty,
             "num_return_sequences": 1,
             "eos_token_id": 128258,
+            "pad_token_id": 128263,  # Explicitly set pad_token_id
         }
         gen_params.update(generation_kwargs)
         
+        print(f"Generation parameters: {gen_params}")
+        
         # Generate
-        with torch.no_grad():
-            generated_ids = self._text_model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                **gen_params
-            )
+        try:
+            with torch.no_grad():
+                generated_ids = self._text_model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    **gen_params
+                )
+            
+            print(f"Generated IDs shape: {generated_ids.shape}")
+            
+        except Exception as e:
+            print(f"Generation error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise
         
         # Extract audio tokens
+        print("Extracting audio tokens from generated output...")
         audio_token_lists = extract_generated_audio_tokens(generated_ids)
+        
+        if not audio_token_lists:
+            raise ValueError("No audio tokens extracted from generated output")
+        
+        print(f"Extracted {len(audio_token_lists)} audio token sequences")
         
         # Decode and save audio
         os.makedirs(output_dir, exist_ok=True)
@@ -219,13 +242,29 @@ class VoiceCloneModel:
                 print(f"Warning: Empty token list for sample {i}")
                 continue
             
-            # Decode audio
-            audio_tensor = self._audio_tokenizer.detokenize_audio(token_list)
+            print(f"Processing audio tokens for sample {i}: {len(token_list)} tokens")
             
-            # Save to file
-            output_path = os.path.join(output_dir, f"generated_{i:03d}.wav")
-            save_audio_to_wav(audio_tensor, output_path, self.config.sample_rate)
-            output_paths.append(output_path)
+            try:
+                # Decode audio
+                audio_tensor = self._audio_tokenizer.detokenize_audio(token_list)
+                
+                if audio_tensor is None:
+                    print(f"Warning: Failed to decode audio for sample {i}")
+                    continue
+                
+                # Save to file
+                output_path = os.path.join(output_dir, f"generated_{i:03d}.wav")
+                save_audio_to_wav(audio_tensor, output_path, self.config.sample_rate)
+                output_paths.append(output_path)
+                
+            except Exception as e:
+                print(f"Error processing sample {i}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        if not output_paths:
+            raise ValueError("Failed to generate any valid audio outputs")
         
         return output_paths
     

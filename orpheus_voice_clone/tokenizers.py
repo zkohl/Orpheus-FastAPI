@@ -30,13 +30,19 @@ class AudioTokenizer:
         Returns:
             List of audio tokens
         """
+        print(f"Tokenizing audio waveform with shape: {waveform.shape}")
+        
         # Prepare waveform tensor
         waveform_tensor = torch.from_numpy(waveform).unsqueeze(0)
         waveform_tensor = waveform_tensor.to(dtype=torch.float32).unsqueeze(0)
         
+        print(f"Waveform tensor shape: {waveform_tensor.shape}")
+        
         # Encode audio
         with torch.inference_mode():
             codes = self.snac_model.encode(waveform_tensor)
+        
+        print(f"Encoded audio - Layer shapes: {[c.shape for c in codes]}")
         
         # Interleave codes according to SNAC format
         all_codes = []
@@ -54,6 +60,9 @@ class AudioTokenizer:
             all_codes.append(codes[2][0][(4*i)+2].item() + self.base_offset + self.layer_offsets[5])
             all_codes.append(codes[2][0][(4*i)+3].item() + self.base_offset + self.layer_offsets[6])
         
+        print(f"Generated {len(all_codes)} audio tokens")
+        print(f"Token range: {min(all_codes)} to {max(all_codes)}")
+        
         return all_codes
     
     def detokenize_audio(self, token_list: List[int]) -> torch.Tensor:
@@ -66,6 +75,11 @@ class AudioTokenizer:
         Returns:
             Audio waveform as torch tensor
         """
+        print(f"Detokenizing {len(token_list)} audio tokens")
+        
+        if len(token_list) < 7:
+            raise ValueError(f"Token list too short: {len(token_list)} tokens (minimum 7 required)")
+        
         # Remove base offset
         adjusted_tokens = [t - self.base_offset for t in token_list]
         
@@ -123,6 +137,8 @@ def prepare_prompt_tokens(
     Returns:
         Tuple of (input_ids, attention_mask)
     """
+    print(f"Preparing prompts - Audio tokens: {len(audio_tokens)}, Voice prompt: '{voice_prompt}', Target texts: {len(target_texts)}")
+    
     # Special tokens
     SOH = 128259  # Start of human
     SOT = 128257  # Start of text
@@ -205,23 +221,35 @@ def extract_generated_audio_tokens(
     Returns:
         List of audio token sequences
     """
+    print(f"Extracting audio tokens from sequences of shape: {generated_ids.shape}")
+    print(f"Looking for start token: {start_token}, end token: {end_token}")
+    
     token_lists = []
     
-    for sequence in generated_ids:
+    for idx, sequence in enumerate(generated_ids):
+        # Debug: print first and last 20 tokens
+        print(f"Sequence {idx} - First 20 tokens: {sequence[:20].tolist()}")
+        print(f"Sequence {idx} - Last 20 tokens: {sequence[-20:].tolist()}")
+        
         # Find last occurrence of start token
         start_indices = (sequence == start_token).nonzero(as_tuple=True)[0]
         
         if len(start_indices) > 0:
             last_start_idx = start_indices[-1].item()
+            print(f"Found start token at index: {last_start_idx}")
             cropped = sequence[last_start_idx + 1:]
         else:
+            print(f"Warning: No start token found in sequence {idx}")
             cropped = sequence
         
         # Remove end tokens
         audio_tokens = cropped[cropped != end_token].tolist()
+        print(f"Extracted {len(audio_tokens)} tokens after removing end tokens")
         
         # Ensure length is multiple of 7 for proper decoding
         trimmed_length = (len(audio_tokens) // 7) * 7
+        if trimmed_length != len(audio_tokens):
+            print(f"Trimming from {len(audio_tokens)} to {trimmed_length} tokens (multiple of 7)")
         audio_tokens = audio_tokens[:trimmed_length]
         
         token_lists.append(audio_tokens)
