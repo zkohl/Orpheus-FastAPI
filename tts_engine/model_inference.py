@@ -535,8 +535,8 @@ def generate_zero_shot_speech(
     print(f"Voice transcript: {voice_transcript}")
     print(f"Voice tokens: {len(voice_tokens)} tokens")
     
-    # Create input prompt
-    input_ids = create_zero_shot_prompt(target_text, voice_transcript, voice_tokens)
+    # Create input prompt - fix the argument order to match function signature
+    input_ids = create_zero_shot_prompt(target_text, voice_tokens, voice_transcript)
     input_length = input_ids.shape[1]
     
     print(f"Input prompt length: {input_length} tokens")

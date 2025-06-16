@@ -508,4 +508,8 @@ if __name__ == "__main__":
     extra_files = ["restart.flag"] if os.path.exists("restart.flag") else []
     
     # Start with reload enabled to allow automatic restart when restart.flag changes
-    uvicorn.run("app:app", host=host, port=port, reload=True, reload_dirs=["."], reload_includes=["*.py", "*.html", "restart.flag"])
+    # Exclude .venv directory to prevent reloading on dependency changes
+    uvicorn.run("app:app", host=host, port=port, reload=True,
+                reload_dirs=["."],
+                reload_includes=["*.py", "*.html", "restart.flag"],
+                reload_excludes=[".venv/*", "venv/*", "__pycache__/*", "*.pyc", "outputs/*"])
