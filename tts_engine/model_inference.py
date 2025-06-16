@@ -279,7 +279,7 @@ def create_zero_shot_prompt(
     voice_tokens: List[int],
     voice_transcript: str
 ) -> torch.Tensor:
-    """Create the input IDs for zero-shot voice cloning"""
+    """Create the input IDs for zero-shot voice cloning - EXACTLY like notebook"""
     global _use_simple_tokenizer
     
     _, tokenizer = get_orpheus_model()
@@ -296,7 +296,6 @@ def create_zero_shot_prompt(
         target_text_ids = tokenizer(target_text, return_tensors="pt").input_ids[0]
     
     # Special tokens - matching notebook exactly
-    # The notebook uses different token combinations!
     # From notebook: 
     # start_tokens = torch.tensor([[ 128259]], dtype=torch.int64)  # SOH
     # end_tokens = torch.tensor([[128009, 128260, 128261, 128257]], dtype=torch.int64)  # EOS, SOS, SOT, EOT
@@ -304,7 +303,7 @@ def create_zero_shot_prompt(
     
     # Let's match the notebook's structure exactly
     start_tokens = torch.tensor([128259])  # SOH
-    end_tokens = torch.tensor([128009, 128260, 128261, 128257])  # EOS, SOS, SOT, EOT (!)
+    end_tokens = torch.tensor([128009, 128260, 128261, 128257])  # EOS, SOS, SOT, EOT
     final_tokens = torch.tensor([128258, 128262])  # EOH, EOAI
     
     # Build prompt EXACTLY like notebook:
@@ -354,11 +353,22 @@ def extract_speech_tokens(generated_ids: torch.Tensor, input_length: int) -> Lis
     eot_positions = [i for i, token in enumerate(full_sequence) if token == token_to_find]
     print(f"[DEBUG] EOT (128257) positions found: {eot_positions}")
     
+    # Also check for EOS/EOH to stop early
+    eos_eoh_positions = [i for i, token in enumerate(full_sequence) if token in [128009, 128258]]
+    print(f"[DEBUG] EOS/EOH positions: {eos_eoh_positions[:10]}...")  # First 10
+    
     # Notebook: if len(token_indices[1]) > 0: last_occurrence_idx = token_indices[1][-1].item()
     if eot_positions:
         last_eot_idx = eot_positions[-1]
         # Notebook: cropped_tensor = generated_ids[:, last_occurrence_idx+1:]
         cropped_tokens = full_sequence[last_eot_idx + 1:]
+        
+        # Find first EOS/EOH after last EOT to stop there
+        stop_positions = [i - last_eot_idx - 1 for i in eos_eoh_positions if i > last_eot_idx]
+        if stop_positions and stop_positions[0] < len(cropped_tokens):
+            print(f"[DEBUG] Found EOS/EOH at position {stop_positions[0]} after EOT, truncating")
+            cropped_tokens = cropped_tokens[:stop_positions[0]]
+        
         print(f"[DEBUG] Tokens after last EOT: {len(cropped_tokens)}")
         print(f"[DEBUG] First 20 tokens after EOT: {cropped_tokens[:20]}")
     else:
@@ -396,7 +406,7 @@ def tokens_to_speech_codes(tokens: List[int]) -> Tuple[List[int], List[int], Lis
     
     # Subtract 128266 from ALL tokens (notebook does this to ALL tokens, not just >= 128266)
     adjusted_tokens = [t - 128266 for t in trimmed_tokens]
-    print(f"[DEBUG] After subtracting 128266, first 10 adjusted tokens: {adjusted_tokens[:10]}")
+    print(f"[DEBUG] After subtracting 128266, first 10 adjusted tokens: {adjusted_tokens[:10] if adjusted_tokens else []}")
     print(f"[DEBUG] Adjusted token range: {min(adjusted_tokens) if adjusted_tokens else 'N/A'} - {max(adjusted_tokens) if adjusted_tokens else 'N/A'}")
     
     if not adjusted_tokens:
@@ -526,7 +536,7 @@ def generate_zero_shot_speech(
     print(f"Voice tokens: {len(voice_tokens)} tokens")
     
     # Create input prompt
-    input_ids = create_zero_shot_prompt(target_text, voice_tokens, voice_transcript)
+    input_ids = create_zero_shot_prompt(target_text, voice_transcript, voice_tokens)
     input_length = input_ids.shape[1]
     
     print(f"Input prompt length: {input_length} tokens")
@@ -536,10 +546,9 @@ def generate_zero_shot_speech(
     print(f"Starting model generation (this may take a while on CPU)...")
     print(f"Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
     
-    # For CPU, use fewer tokens to avoid long waits
-    if not torch.cuda.is_available():
-        max_tokens = min(max_tokens, 500)  # Limit to 500 tokens on CPU
-        print(f"CPU mode: Limiting generation to {max_tokens} tokens for faster response")
+    # Notebook uses max_new_tokens=990, let's match that
+    max_tokens = min(max_tokens, 990)  # Notebook limit
+    print(f"[MAIN] Limiting generation to {max_tokens} tokens (notebook uses 990)")
     
     try:
         generated_ids = generate_with_model(
