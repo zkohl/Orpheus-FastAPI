@@ -75,12 +75,28 @@ app = FastAPI(
 # The log message "INFO:     Application startup complete." indicates
 # that the application is ready
 
+# Load default voice clone config at startup
+if VOICE_CLONE_AVAILABLE:
+    from orpheus_voice_clone import ModelConfig
+    default_voice_clone_config = ModelConfig(
+        huggingface_token=os.environ.get("HF_TOKEN")
+    )
+    print("\n🎤 Default Zero-Shot Voice Clone Configuration:")
+    print(f"   Max New Tokens: {default_voice_clone_config.max_new_tokens}")
+    print(f"   Temperature: {default_voice_clone_config.temperature}")
+    print(f"   Top P: {default_voice_clone_config.top_p}")
+    print(f"   Repetition Penalty: {default_voice_clone_config.repetition_penalty}")
+    print(f"   Sample Rate: {default_voice_clone_config.sample_rate} Hz")
+    print(f"   Device: {default_voice_clone_config.device}")
+    print("")
+
 # Initialize voice clone model (singleton pattern)
 voice_clone_model = None
+default_voice_clone_config = None
 
-async def get_voice_clone_model():
-    """Get or initialize the voice clone model"""
-    global voice_clone_model
+async def get_voice_clone_model(config: Optional[ModelConfig] = None):
+    """Get or initialize the voice clone model with optional config overrides"""
+    global voice_clone_model, default_voice_clone_config
     if not VOICE_CLONE_AVAILABLE:
         raise HTTPException(status_code=503, detail="Voice cloning feature is not available")
     
@@ -94,11 +110,11 @@ async def get_voice_clone_model():
                 detail="HF_TOKEN not configured. Please set the HuggingFace token in the .env file."
             )
         
-        config = ModelConfig(
-            huggingface_token=hf_token,
-            # Generation parameters will be read from environment variables in ModelConfig.__post_init__
-            # max_new_tokens, temperature, top_p, repetition_penalty are set from env vars
-        )
+        # Use provided config or default
+        if config is None:
+            config = default_voice_clone_config if default_voice_clone_config else ModelConfig(
+                huggingface_token=hf_token
+            )
         
         try:
             voice_clone_model = VoiceCloneModel(config)
@@ -181,7 +197,11 @@ async def create_speech_api(request: SpeechRequest):
 async def create_zero_shot_speech(
     text: str = Form(..., description="Text to be spoken with the cloned voice"),
     voice_transcript: str = Form(..., description="Transcript of what's said in the voice sample"),
-    voice_audio: UploadFile = File(..., description="Voice sample audio file (WAV format)")
+    voice_audio: UploadFile = File(..., description="Voice sample audio file (WAV format)"),
+    max_new_tokens: Optional[int] = Form(None, description="Maximum number of new tokens to generate"),
+    temperature: Optional[float] = Form(None, description="Temperature for generation (0.0-1.0)"),
+    top_p: Optional[float] = Form(None, description="Top-p sampling parameter (0.0-1.0)"),
+    repetition_penalty: Optional[float] = Form(None, description="Repetition penalty parameter")
 ):
     """
     Generate speech using zero-shot voice cloning.
@@ -193,6 +213,10 @@ async def create_zero_shot_speech(
     - text: The text you want the cloned voice to speak
     - voice_transcript: Accurate transcript of what's being said in the voice sample
     - voice_audio: Audio file containing the voice sample (WAV format recommended)
+    - max_new_tokens: (Optional) Maximum number of new tokens to generate
+    - temperature: (Optional) Temperature for generation (0.0-1.0)
+    - top_p: (Optional) Top-p sampling parameter (0.0-1.0)
+    - repetition_penalty: (Optional) Repetition penalty parameter
     
     Example usage:
     ```bash
@@ -200,6 +224,8 @@ async def create_zero_shot_speech(
       -F 'text=I finally got into the university of my dreams!' \\
       -F 'voice_transcript=Okay, you are relentless...' \\
       -F 'voice_audio=@/path/to/voice_sample.wav' \\
+      -F 'temperature=0.7' \\
+      -F 'max_new_tokens=1000' \\
       --output output.wav
     ```
     """
@@ -217,6 +243,23 @@ async def create_zero_shot_speech(
             status_code=400,
             detail="Invalid audio format. Supported formats: WAV, MP3, M4A, FLAC, OGG"
         )
+    
+    # Create config with client overrides if provided
+    config_overrides = {}
+    if max_new_tokens is not None:
+        config_overrides['max_new_tokens'] = max_new_tokens
+    if temperature is not None:
+        config_overrides['temperature'] = temperature
+    if top_p is not None:
+        config_overrides['top_p'] = top_p
+    if repetition_penalty is not None:
+        config_overrides['repetition_penalty'] = repetition_penalty
+    
+    # Print configuration being used
+    if config_overrides:
+        print("🔧 Using custom generation parameters:")
+        for key, value in config_overrides.items():
+            print(f"   {key}: {value}")
     
     # Get the voice clone model
     model = await get_voice_clone_model()
@@ -244,12 +287,13 @@ async def create_zero_shot_speech(
         print("🎙️ Starting zero-shot voice cloning...")
         
         try:
-            # Use the voice clone model to generate audio
+            # Use the voice clone model to generate audio with optional parameters
             generated_paths = model.clone_voice(
                 voice_sample_path=temp_audio_path,
                 voice_transcript=voice_transcript,
                 target_texts=[text],  # Process as single text
-                output_dir="outputs"
+                output_dir="outputs",
+                **config_overrides  # Pass generation parameters
             )
             
             if not generated_paths:
