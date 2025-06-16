@@ -44,14 +44,25 @@ ensure_env_file_exists()
 # Load environment variables from .env file
 load_dotenv(override=True)
 
-from fastapi import FastAPI, Request, Form, HTTPException, Depends
+from fastapi import FastAPI, Request, Form, HTTPException, Depends, File, UploadFile
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import json
+import tempfile
+import shutil
 
 from tts_engine import generate_speech_from_api, AVAILABLE_VOICES, DEFAULT_VOICE, VOICE_TO_LANGUAGE, AVAILABLE_LANGUAGES
+
+# Import voice cloning components
+try:
+    from orpheus_voice_clone import VoiceCloneModel, ModelConfig
+    VOICE_CLONE_AVAILABLE = True
+    print("✅ Voice cloning module loaded successfully")
+except ImportError as e:
+    VOICE_CLONE_AVAILABLE = False
+    print(f"⚠️ Voice cloning not available: {e}")
 
 # Create FastAPI app
 app = FastAPI(
@@ -63,6 +74,43 @@ app = FastAPI(
 # We'll use FastAPI's built-in startup complete mechanism
 # The log message "INFO:     Application startup complete." indicates
 # that the application is ready
+
+# Initialize voice clone model (singleton pattern)
+voice_clone_model = None
+
+async def get_voice_clone_model():
+    """Get or initialize the voice clone model"""
+    global voice_clone_model
+    if not VOICE_CLONE_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Voice cloning feature is not available")
+    
+    if voice_clone_model is None:
+        print("🎤 Initializing voice clone model...")
+        # Get HuggingFace token from environment
+        hf_token = os.environ.get("HF_TOKEN")
+        if not hf_token:
+            raise HTTPException(
+                status_code=503,
+                detail="HF_TOKEN not configured. Please set the HuggingFace token in the .env file."
+            )
+        
+        config = ModelConfig(
+            huggingface_token=hf_token,
+            temperature=0.5,
+            top_p=0.9,
+            repetition_penalty=1.1
+        )
+        
+        try:
+            voice_clone_model = VoiceCloneModel(config)
+            # Warmup the model for better performance
+            voice_clone_model.warmup()
+            print("✅ Voice clone model initialized and warmed up")
+        except Exception as e:
+            print(f"❌ Failed to initialize voice clone model: {e}")
+            raise HTTPException(status_code=503, detail=f"Failed to initialize voice clone model: {str(e)}")
+    
+    return voice_clone_model
 
 # Ensure directories exist
 os.makedirs("outputs", exist_ok=True)
@@ -130,6 +178,125 @@ async def create_speech_api(request: SpeechRequest):
         filename=f"{request.voice}_{timestamp}.wav"
     )
 
+@app.post("/v1/audio/speech/zero-shot")
+async def create_zero_shot_speech(
+    text: str = Form(..., description="Text to be spoken with the cloned voice"),
+    voice_transcript: str = Form(..., description="Transcript of what's said in the voice sample"),
+    voice_audio: UploadFile = File(..., description="Voice sample audio file (WAV format)")
+):
+    """
+    Generate speech using zero-shot voice cloning.
+    
+    This endpoint clones a voice from a provided audio sample and uses it to speak new text.
+    The voice cloning runs directly on this server, not through the external LLM API.
+    
+    Parameters:
+    - text: The text you want the cloned voice to speak
+    - voice_transcript: Accurate transcript of what's being said in the voice sample
+    - voice_audio: Audio file containing the voice sample (WAV format recommended)
+    
+    Example usage:
+    ```bash
+    curl -X POST https://orpheus.zkohl.net/v1/audio/speech/zero-shot \\
+      -F 'text=I finally got into the university of my dreams!' \\
+      -F 'voice_transcript=Okay, you are relentless...' \\
+      -F 'voice_audio=@/path/to/voice_sample.wav' \\
+      --output output.wav
+    ```
+    """
+    # Validate inputs
+    if not text:
+        raise HTTPException(status_code=400, detail="Missing 'text' parameter")
+    if not voice_transcript:
+        raise HTTPException(status_code=400, detail="Missing 'voice_transcript' parameter")
+    if not voice_audio:
+        raise HTTPException(status_code=400, detail="Missing 'voice_audio' file")
+    
+    # Check file type
+    if not voice_audio.filename.lower().endswith(('.wav', '.mp3', '.m4a', '.flac', '.ogg')):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid audio format. Supported formats: WAV, MP3, M4A, FLAC, OGG"
+        )
+    
+    # Get the voice clone model
+    model = await get_voice_clone_model()
+    
+    # Create temporary file for the uploaded audio
+    temp_audio_path = None
+    temp_output_path = None
+    
+    try:
+        # Save uploaded file to temporary location
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+            temp_audio_path = tmp_file.name
+            shutil.copyfileobj(voice_audio.file, tmp_file)
+        
+        print(f"📤 Received voice sample: {voice_audio.filename} ({voice_audio.size} bytes)")
+        print(f"📝 Text to generate: {text[:100]}...")
+        
+        # Generate unique output filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_filename = f"zero_shot_{timestamp}.wav"
+        output_path = f"outputs/{output_filename}"
+        
+        # Perform voice cloning
+        start_time = time.time()
+        print("🎙️ Starting zero-shot voice cloning...")
+        
+        try:
+            # Use the voice clone model to generate audio
+            generated_paths = model.clone_voice(
+                voice_sample_path=temp_audio_path,
+                voice_transcript=voice_transcript,
+                target_texts=[text],  # Process as single text
+                output_dir="outputs"
+            )
+            
+            if not generated_paths:
+                raise HTTPException(status_code=500, detail="Voice cloning failed to generate audio")
+            
+            # Rename the generated file to our desired output path
+            if os.path.exists(generated_paths[0]):
+                shutil.move(generated_paths[0], output_path)
+            else:
+                raise HTTPException(status_code=500, detail="Generated audio file not found")
+            
+            end_time = time.time()
+            generation_time = end_time - start_time
+            
+            print(f"✅ Voice cloning completed in {generation_time:.2f} seconds")
+            print(f"📦 Output saved to: {output_path}")
+            
+            # Return the generated audio file
+            return FileResponse(
+                path=output_path,
+                media_type="audio/wav",
+                filename=output_filename,
+                headers={
+                    "X-Generation-Time": str(generation_time),
+                    "X-Voice-Clone": "zero-shot"
+                }
+            )
+            
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=400, detail=f"Audio processing error: {str(e)}")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid input: {str(e)}")
+        except Exception as e:
+            print(f"❌ Voice cloning error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Voice cloning failed: {str(e)}")
+    
+    finally:
+        # Clean up temporary files
+        if temp_audio_path and os.path.exists(temp_audio_path):
+            try:
+                os.remove(temp_audio_path)
+            except Exception as e:
+                print(f"Warning: Could not remove temporary file: {e}")
+
 @app.get("/v1/audio/voices")
 async def list_voices():
     """Return list of available voices"""
@@ -138,7 +305,8 @@ async def list_voices():
     return JSONResponse(
         content={
             "status": "ok",
-            "voices": AVAILABLE_VOICES
+            "voices": AVAILABLE_VOICES,
+            "zero_shot_available": VOICE_CLONE_AVAILABLE
         }
     )
 
