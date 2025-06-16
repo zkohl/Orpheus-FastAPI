@@ -8,14 +8,21 @@ for generating speech with a cloned voice.
 
 import os
 from orpheus_voice_clone import VoiceCloneModel, ModelConfig
+from dotenv import load_dotenv
+# Load environment variables from .env file
+load_dotenv(override=True)
 
+token=os.environ.get("HF_TOKEN")
+if token == None:
+    print("No HF_TOKEN found")
+    exit(1)
 
 def main():
     """Main example function."""
     
     # Configure the model
     config = ModelConfig(
-        huggingface_token=os.environ.get("HF_TOKEN"),
+        huggingface_token=token,
         temperature=0.5,
         top_p=0.9,
         repetition_penalty=1.1
@@ -29,7 +36,7 @@ def main():
     model.warmup()
     
     # Define inputs
-    voice_sample_path = "input_audio/zach.wav"
+    voice_sample_path = "input_audio/maya voice clone input short.wav"
     voice_transcript = (
         "Okay, you are relentless, I like it. They were weighing up a few options, "
         "but Pinecone won out because of its speed and scalability, especially with "
