@@ -1,12 +1,13 @@
 """Main voice cloning model class."""
 
 import os
+import time
 from typing import List, Optional, Union
 from pathlib import Path
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download, scan_cache_dir
 from snac import SNAC
 
 from .config import ModelConfig
@@ -39,63 +40,182 @@ class VoiceCloneModel:
         self._tokenizer = None
         self._audio_tokenizer = None
         
+        # Cache directory for models
+        self.cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+        
         print(f"Initialized VoiceCloneModel on device: {self.config.device}")
+        print(f"Model cache directory: {self.cache_dir}")
     
     def _ensure_initialized(self):
         """Ensure models are loaded (lazy initialization)."""
         if not self._initialized:
             self._load_models()
     
+    def _check_model_cached(self, repo_id: str) -> bool:
+        """
+        Check if a model is already cached locally.
+        
+        Args:
+            repo_id: HuggingFace repository ID
+            
+        Returns:
+            True if model is cached, False otherwise
+        """
+        try:
+            # Use HuggingFace's cache scanning to check if model exists
+            cache_info = scan_cache_dir(self.cache_dir)
+            for repo in cache_info.repos:
+                if repo.repo_id == repo_id and repo.size_on_disk > 0:
+                    print(f"✓ Model {repo_id} already cached ({repo.size_on_disk_str})")
+                    return True
+            return False
+        except Exception as e:
+            print(f"Warning: Could not scan cache: {e}")
+            return False
+    
+    def _download_with_retry(self, repo_id: str, max_retries: int = 3) -> str:
+        """
+        Download model with retry logic to handle rate limiting.
+        
+        Args:
+            repo_id: Repository ID to download
+            max_retries: Maximum number of retry attempts
+            
+        Returns:
+            Path to downloaded model
+        """
+        for attempt in range(max_retries):
+            try:
+                print(f"Downloading {repo_id} (attempt {attempt + 1}/{max_retries})...")
+                
+                model_path = snapshot_download(
+                    repo_id=repo_id,
+                    cache_dir=self.cache_dir,
+                    local_files_only=False,
+                    allow_patterns=[
+                        "config.json",
+                        "*.safetensors",
+                        "model.safetensors.index.json",
+                    ],
+                    ignore_patterns=[
+                        "optimizer.pt",
+                        "pytorch_model.bin",
+                        "training_args.bin",
+                        "scheduler.pt",
+                        "tokenizer.json",
+                        "tokenizer_config.json",
+                        "special_tokens_map.json",
+                        "vocab.json",
+                        "merges.txt",
+                        "tokenizer.*"
+                    ]
+                )
+                
+                print(f"✓ Successfully downloaded {repo_id}")
+                return model_path
+                
+            except Exception as e:
+                if "rate limit" in str(e).lower() or "429" in str(e):
+                    wait_time = min(60 * (2 ** attempt), 300)  # Exponential backoff, max 5 minutes
+                    print(f"⚠️ Rate limited on attempt {attempt + 1}. Waiting {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"❌ Download error on attempt {attempt + 1}: {e}")
+                    if attempt == max_retries - 1:
+                        raise
+                    time.sleep(5)  # Brief pause before retry
+        
+        raise Exception(f"Failed to download {repo_id} after {max_retries} attempts")
+    
     def _load_models(self):
-        """Load all required models."""
+        """Load all required models with caching support."""
         print("Loading models...")
         
-        # Load tokenizer
-        print(f"Loading tokenizer with name: {self.config.model_name}...")
-        self._tokenizer = AutoTokenizer.from_pretrained(self.config.model_name)
-        
-        # Load SNAC model
-        print(f"Loading SNAC audio model with name: {self.config.snac_model_name}...")
-        self._snac_model = SNAC.from_pretrained(self.config.snac_model_name)
-        self._audio_tokenizer = AudioTokenizer(self._snac_model)
-        
-        # Download model files efficiently
-        print("Downloading model files...")
-        model_path = self._download_model_files()
-        
-        # Load text generation model
-        print("Loading text generation model...")
-        self._text_model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.bfloat16
-        )
-        self._text_model.to(self.config.device)
-        
-        self._initialized = True
-        print("Models loaded successfully!")
-    
-    def _download_model_files(self) -> str:
-        """Download model files efficiently, excluding unnecessary files."""
-        return snapshot_download(
-            repo_id=self.config.model_name,
-            allow_patterns=[
-                "config.json",
-                "*.safetensors",
-                "model.safetensors.index.json",
-            ],
-            ignore_patterns=[
-                "optimizer.pt",
-                "pytorch_model.bin",
-                "training_args.bin",
-                "scheduler.pt",
-                "tokenizer.json",
-                "tokenizer_config.json",
-                "special_tokens_map.json",
-                "vocab.json",
-                "merges.txt",
-                "tokenizer.*"
-            ]
-        )
+        # Try to load from cache first
+        try:
+            # Load tokenizer (usually small and fast)
+            print(f"Loading tokenizer: {self.config.model_name}...")
+            try:
+                # First try loading from local cache
+                self._tokenizer = AutoTokenizer.from_pretrained(
+                    self.config.model_name,
+                    cache_dir=self.cache_dir,
+                    local_files_only=True
+                )
+                print("✓ Loaded tokenizer from cache")
+            except Exception:
+                # If not in cache, download it
+                print("Tokenizer not in cache, downloading...")
+                self._tokenizer = AutoTokenizer.from_pretrained(
+                    self.config.model_name,
+                    cache_dir=self.cache_dir,
+                    local_files_only=False
+                )
+            
+            # Load SNAC model
+            print(f"Loading SNAC audio model: {self.config.snac_model_name}...")
+            try:
+                # Try local cache first
+                self._snac_model = SNAC.from_pretrained(
+                    self.config.snac_model_name,
+                    cache_dir=self.cache_dir,
+                    local_files_only=True
+                )
+                print("✓ Loaded SNAC model from cache")
+            except Exception:
+                # Download if not cached
+                print("SNAC model not in cache, downloading...")
+                self._snac_model = SNAC.from_pretrained(
+                    self.config.snac_model_name,
+                    cache_dir=self.cache_dir,
+                    local_files_only=False
+                )
+            
+            self._audio_tokenizer = AudioTokenizer(self._snac_model)
+            
+            # Load main model
+            print(f"Loading main model: {self.config.model_name}...")
+            
+            # Check if model is already cached
+            if self._check_model_cached(self.config.model_name):
+                try:
+                    # Load from local cache
+                    model_path = snapshot_download(
+                        repo_id=self.config.model_name,
+                        cache_dir=self.cache_dir,
+                        local_files_only=True,
+                        allow_patterns=[
+                            "config.json",
+                            "*.safetensors",
+                            "model.safetensors.index.json",
+                        ]
+                    )
+                    print("✓ Using cached model files")
+                except Exception as e:
+                    print(f"Warning: Cache check passed but loading failed: {e}")
+                    # Fall back to downloading
+                    model_path = self._download_with_retry(self.config.model_name)
+            else:
+                # Download model with retry logic
+                model_path = self._download_with_retry(self.config.model_name)
+            
+            # Load the model
+            print("Loading text generation model into memory...")
+            self._text_model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                cache_dir=self.cache_dir,
+                local_files_only=True  # Use local files since we just downloaded/verified them
+            )
+            self._text_model.to(self.config.device)
+            
+            self._initialized = True
+            print("✅ All models loaded successfully!")
+            
+        except Exception as e:
+            print(f"❌ Failed to load models: {e}")
+            self._initialized = False
+            raise
     
     def clone_voice(
         self,
@@ -336,3 +456,19 @@ class VoiceCloneModel:
         """
         self._ensure_initialized()
         print("Model warmed up and ready!")
+    
+    def clear_cache(self):
+        """
+        Clear the model cache if needed (useful for updates or space management).
+        
+        Note: This will require re-downloading models on next use.
+        """
+        if hasattr(self, '_text_model') and self._text_model is not None:
+            del self._text_model
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        
+        if hasattr(self, '_snac_model') and self._snac_model is not None:
+            del self._snac_model
+        
+        self._initialized = False
+        print("Model cache cleared")

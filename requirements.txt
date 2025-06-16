@@ -22,6 +22,7 @@ numpy>=2.1.0
 sounddevice==0.4.6
 snac>=1.2.1  # Required for audio generation from tokens
 librosa>=0.11.0
+soundfile>=0.12.1  # Required for saving audio files
 
 # System Utilities
 psutil==5.9.0

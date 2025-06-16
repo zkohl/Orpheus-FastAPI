@@ -93,6 +93,7 @@ if VOICE_CLONE_AVAILABLE:
 # Initialize voice clone model (singleton pattern)
 voice_clone_model = None
 default_voice_clone_config = None
+voice_clone_init_lock = asyncio.Lock()
 
 async def get_voice_clone_model(config: Optional[ModelConfig] = None):
     """Get or initialize the voice clone model with optional config overrides"""
@@ -100,30 +101,38 @@ async def get_voice_clone_model(config: Optional[ModelConfig] = None):
     if not VOICE_CLONE_AVAILABLE:
         raise HTTPException(status_code=503, detail="Voice cloning feature is not available")
     
-    if voice_clone_model is None:
-        print("🎤 Initializing voice clone model...")
-        # Get HuggingFace token from environment
-        hf_token = os.environ.get("HF_TOKEN")
-        if not hf_token:
-            raise HTTPException(
-                status_code=503,
-                detail="HF_TOKEN not configured. Please set the HuggingFace token in the .env file."
-            )
-        
-        # Use provided config or default
-        if config is None:
-            config = default_voice_clone_config if default_voice_clone_config else ModelConfig(
-                huggingface_token=hf_token
-            )
-        
-        try:
-            voice_clone_model = VoiceCloneModel(config)
-            # Warmup the model for better performance
-            voice_clone_model.warmup()
-            print("✅ Voice clone model initialized and warmed up")
-        except Exception as e:
-            print(f"❌ Failed to initialize voice clone model: {e}")
-            raise HTTPException(status_code=503, detail=f"Failed to initialize voice clone model: {str(e)}")
+    # Use lock to prevent concurrent initialization
+    async with voice_clone_init_lock:
+        if voice_clone_model is None:
+            print("🎤 Initializing voice clone model...")
+            # Get HuggingFace token from environment
+            hf_token = os.environ.get("HF_TOKEN")
+            if not hf_token:
+                raise HTTPException(
+                    status_code=503,
+                    detail="HF_TOKEN not configured. Please set the HuggingFace token in the .env file."
+                )
+            
+            # Use provided config or default
+            if config is None:
+                config = default_voice_clone_config if default_voice_clone_config else ModelConfig(
+                    huggingface_token=hf_token
+                )
+            
+            try:
+                voice_clone_model = VoiceCloneModel(config)
+                # Warmup the model for better performance
+                voice_clone_model.warmup()
+                print("✅ Voice clone model initialized and warmed up")
+            except Exception as e:
+                print(f"❌ Failed to initialize voice clone model: {e}")
+                # Check if it's a rate limit error
+                if "rate limit" in str(e).lower() or "429" in str(e):
+                    raise HTTPException(
+                        status_code=503,
+                        detail="HuggingFace rate limit reached. Please wait a few minutes before trying again."
+                    )
+                raise HTTPException(status_code=503, detail=f"Failed to initialize voice clone model: {str(e)}")
     
     return voice_clone_model
 
