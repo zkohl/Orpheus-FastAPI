@@ -79,7 +79,7 @@ def batch_example():
     config = ModelConfig()
     model = VoiceCloneModel(config)
     
-    voice_sample = "input_audio/zach.wav"
+    voice_sample = "input_audio/maya voice clone input short.wav"
     transcript = "Your voice sample transcript here..."
     
     # Multiple batches of texts

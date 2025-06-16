@@ -51,17 +51,11 @@ class VoiceCloneModel:
         print("Loading models...")
         
         # Load tokenizer
-        print("Loading tokenizer...")
-        try:
-            self._tokenizer = AutoTokenizer.from_pretrained(self.config.model_name)
-        except Exception as e:
-            print(f"Failed to load tokenizer with AutoTokenizer: {e}")
-            print("Trying alternative loading method...")
-            from transformers import LlamaTokenizerFast
-            self._tokenizer = LlamaTokenizerFast.from_pretrained(self.config.model_name)
+        print(f"Loading tokenizer with name: {self.config.model_name}...")
+        self._tokenizer = AutoTokenizer.from_pretrained(self.config.model_name)
         
         # Load SNAC model
-        print("Loading SNAC audio model...")
+        print(f"Loading SNAC audio model with name: {self.config.snac_model_name}...")
         self._snac_model = SNAC.from_pretrained(self.config.snac_model_name)
         self._audio_tokenizer = AudioTokenizer(self._snac_model)
         
