@@ -115,7 +115,13 @@ class AudioTokenizer:
         ]
         
         # Decode to audio
-        audio_hat = self.snac_model.decode(codes)
+        with torch.no_grad():
+            audio_hat = self.snac_model.decode(codes)
+        
+        # Ensure the tensor is detached from computation graph
+        if audio_hat.requires_grad:
+            audio_hat = audio_hat.detach()
+        
         return audio_hat
 
 

@@ -1,62 +1,60 @@
 """Audio processing utilities for voice cloning."""
 
 import os
-from typing import Tuple
+from typing import Tuple, Union
+from pathlib import Path
 
 import numpy as np
 import torch
-import librosa
+import torchaudio
 import soundfile as sf
 
 
-def load_audio(file_path: str, target_sample_rate: int = 24000) -> Tuple[np.ndarray, int]:
+def load_audio(file_path: Union[str, Path], target_sample_rate: int = 24000) -> Tuple[np.ndarray, int]:
     """
     Load audio file and resample to target sample rate.
     
     Args:
         file_path: Path to audio file
-        target_sample_rate: Target sample rate (default: 24000 Hz)
+        target_sample_rate: Target sample rate (default: 24000)
     
     Returns:
         Tuple of (audio_array, sample_rate)
     """
-    # Load audio with librosa (handles various formats)
-    audio, sr = librosa.load(file_path, sr=target_sample_rate, mono=True)
+    # Load audio using torchaudio
+    waveform, sample_rate = torchaudio.load(file_path)
     
-    # Normalize audio to [-1, 1] range
-    if np.max(np.abs(audio)) > 0:
-        audio = audio / np.max(np.abs(audio))
+    # Convert to mono if stereo
+    if waveform.shape[0] > 1:
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
     
-    return audio, target_sample_rate
+    # Resample if necessary
+    if sample_rate != target_sample_rate:
+        resampler = torchaudio.transforms.Resample(sample_rate, target_sample_rate)
+        waveform = resampler(waveform)
+    
+    # Convert to numpy array
+    audio_array = waveform.squeeze().numpy()
+    
+    return audio_array, target_sample_rate
 
 
-def save_audio_to_wav(audio_tensor: torch.Tensor, output_path: str, sample_rate: int = 24000):
+def save_audio_to_wav(audio_tensor: torch.Tensor, output_path: Union[str, Path], sample_rate: int = 24000):
     """
     Save audio tensor to WAV file.
     
     Args:
-        audio_tensor: Audio data as torch tensor
-        output_path: Path to save WAV file
-        sample_rate: Audio sample rate
+        audio_tensor: Audio tensor to save
+        output_path: Path to save the audio file
+        sample_rate: Sample rate of the audio
     """
-    # Convert to numpy and ensure proper shape
-    if isinstance(audio_tensor, torch.Tensor):
-        audio_np = audio_tensor.squeeze().cpu().numpy()
-    else:
-        audio_np = np.array(audio_tensor).squeeze()
+    # Ensure the tensor is detached from computation graph and on CPU
+    audio_np = audio_tensor.squeeze().detach().cpu().numpy()
     
-    # Ensure 1D array
-    if len(audio_np.shape) > 1:
-        audio_np = audio_np.squeeze()
-    
-    # Normalize to prevent clipping
-    if np.max(np.abs(audio_np)) > 1.0:
-        audio_np = audio_np / np.max(np.abs(audio_np))
-    
-    # Create output directory if needed
+    # Ensure output directory exists
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    # Save as WAV
+    # Save using soundfile
     sf.write(output_path, audio_np, sample_rate)
     print(f"Saved audio to: {output_path}")
 
@@ -66,13 +64,13 @@ def validate_audio_duration(audio_array: np.ndarray, sample_rate: int, min_durat
     Validate audio duration is within acceptable range.
     
     Args:
-        audio_array: Audio data array
+        audio_array: Audio samples
         sample_rate: Sample rate
         min_duration: Minimum duration in seconds
         max_duration: Maximum duration in seconds
     
     Raises:
-        ValueError: If audio duration is outside acceptable range
+        ValueError: If duration is outside acceptable range
     """
     duration = len(audio_array) / sample_rate
     
