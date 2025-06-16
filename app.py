@@ -96,9 +96,8 @@ async def get_voice_clone_model():
         
         config = ModelConfig(
             huggingface_token=hf_token,
-            temperature=0.5,
-            top_p=0.9,
-            repetition_penalty=1.1
+            # Generation parameters will be read from environment variables in ModelConfig.__post_init__
+            # max_new_tokens, temperature, top_p, repetition_penalty are set from env vars
         )
         
         try:

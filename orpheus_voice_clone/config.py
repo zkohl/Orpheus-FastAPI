@@ -16,11 +16,11 @@ class ModelConfig:
     # Audio settings
     sample_rate: int = 24000
     
-    # Generation settings
-    max_new_tokens: int = 990
-    temperature: float = 0.5
-    top_p: float = 0.9
-    repetition_penalty: float = 1.1
+    # Generation settings (with environment variable defaults)
+    max_new_tokens: int = None
+    temperature: float = None
+    top_p: float = None
+    repetition_penalty: float = None
     
     # Token settings
     huggingface_token: Optional[str] = None
@@ -33,6 +33,16 @@ class ModelConfig:
         # Set HuggingFace token from environment if not provided
         if self.huggingface_token is None:
             self.huggingface_token = os.environ.get("HF_TOKEN")
+        
+        # Set generation parameters from environment if not provided
+        if self.max_new_tokens is None:
+            self.max_new_tokens = int(os.environ.get("VOICE_CLONE_MAX_NEW_TOKENS", "990"))
+        if self.temperature is None:
+            self.temperature = float(os.environ.get("VOICE_CLONE_TEMPERATURE", "0.5"))
+        if self.top_p is None:
+            self.top_p = float(os.environ.get("VOICE_CLONE_TOP_P", "0.9"))
+        if self.repetition_penalty is None:
+            self.repetition_penalty = float(os.environ.get("VOICE_CLONE_REPETITION_PENALTY", "1.1"))
         
         # Auto-detect device if not specified
         if self.device is None:
